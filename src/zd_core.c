@@ -64,6 +64,8 @@
 #define USER_AGENT "zdf-downloader/" ZD_VERSION
 #define COVER_PAGE_PREFIX "https://www.zdf.de/"
 #define COVER_URL_PREFIX "https://www.zdf.de/assets/"
+#define COVER_EPG_PREFIX "https://epg-image.zdf.de/"
+#define COVER_NONE_SECONDS (7 * 24 * 3600)  /* Titel ohne Bild so lange nicht neu prüfen */
 #define COVER_SIZE "384x216"
 #define IMDB_API "https://v3.sg.media-imdb.com/suggestion/x/"
 #define PAGE_SIZE 500               /* Einträge je Anfrage */
@@ -1081,8 +1083,9 @@ ZdStatus zd_title_status(const ZdTitle *t, const char *dir, char **path)
  * Titelbilder
  * ---------------------------------------------------------------------------
  * Die Suchdaten enthalten keine Bilder. Die Seite des Titels bei zdf.de nennt eines im
- * Feld "thumbnailUrl"; es landet einmal geladen im Bilderordner. Eine leere
- * Datei merkt sich, dass die Seite kein Bild hat. Der Ordner ist einstellbar.
+ * Feld "thumbnailUrl"; es landet einmal geladen im Bilderordner. Die Größe steht je nach
+ * Server in der Adresse (~1280x720) oder im Parameter (layout=1280x720). Eine Datei ".leer"
+ * merkt sich für eine Weile, dass die Seite kein Bild hat. Der Ordner ist einstellbar.
  * ------------------------------------------------------------------------- */
 static GMutex cover_lock;
 static char *cover_dir;         /* NULL = Standardordner */
@@ -1097,18 +1100,24 @@ static char *cover_url(const char *page)
     const char *end = strchr(start, '"');
     if (!end) return NULL;
     char *url = g_strndup(start, (gsize)(end - start)), *result = NULL;
-    char *tilde = strrchr(url, '~');
-    if (tilde && g_str_has_prefix(url, COVER_URL_PREFIX) && !strpbrk(url, " \\'")) {
+    char *tilde = strrchr(url, '~'), *layout = strstr(url, "layout=");
+    if (strpbrk(url, " \\'")) {
+        /* keine gültige Adresse */
+    } else if (tilde && g_str_has_prefix(url, COVER_URL_PREFIX)) {
         const char *query = strchr(tilde, '?');
         *tilde = 0;
         result = g_strconcat(url, "~" COVER_SIZE, query ? query : "", NULL);
+    } else if (layout && g_str_has_prefix(url, COVER_EPG_PREFIX)) {
+        const char *rest = strchr(layout, '&');
+        *layout = 0;
+        result = g_strconcat(url, "layout=" COVER_SIZE, rest ? rest : "", NULL);
     }
     g_free(url);
     return result;
 }
 
-/* Bild von der Seite website nach path holen */
-static void cover_download(const char *website, const char *path)
+/* Bild von der Seite website nach path holen; hat die Seite keines, none anlegen */
+static void cover_download(const char *website, const char *path, const char *none)
 {
     char *page_argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT,
                          (char *)website, NULL};
@@ -1125,11 +1134,18 @@ static void cover_download(const char *website, const char *path)
         g_free(image_messages);
         g_free(tmp);
     } else if (rc == 0) {
-        g_file_set_contents(path, "", 0, NULL);
+        g_file_set_contents(none, "", 0, NULL);
     }
     g_free(url);
     g_free(reply);
     g_free(messages);
+}
+
+/* Wurde vor kurzem festgestellt, dass es kein Bild gibt? */
+static bool cover_known_missing(const char *none)
+{
+    GStatBuf info;
+    return g_stat(none, &info) == 0 && time(NULL) - info.st_mtime < COVER_NONE_SECONDS;
 }
 
 void zd_set_cover_dir(const char *dir)
@@ -1154,8 +1170,10 @@ char *zd_cover_file(const char *website)
     char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, website, -1);
     char *name = g_strconcat(hash, ".jpg", NULL);
     char *path = g_build_filename(dir, name, NULL);
+    char *none = g_strconcat(path, ".leer", NULL);
     g_mkdir_with_parents(dir, 0755);
-    if (!g_file_test(path, G_FILE_TEST_EXISTS)) cover_download(website, path);
+    if (file_size(path) <= 0 && !cover_known_missing(none)) cover_download(website, path, none);
+    g_free(none);
     g_free(dir);
     g_free(hash);
     g_free(name);

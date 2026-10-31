@@ -1,4 +1,4 @@
-# ZDF-Downloader 1.1.0
+# ZDF-Downloader 1.1.1
 
 Lädt Filme und Serien aus der ZDF-Mediathek – einzelne Folgen, ganze Staffeln oder eine Serie mit
 allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche (`zdf-downloader`, Aufbau und
@@ -16,7 +16,7 @@ sudo apt install zdf-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./zdf-downloader_1.1.0-1_amd64.deb
+sudo apt install ./zdf-downloader_1.1.1-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und

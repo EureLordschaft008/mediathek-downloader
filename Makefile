@@ -5,7 +5,7 @@
 #   make deb        baut das Debian-Paket zdf-downloader_<Version>_<Architektur>.deb
 #   make install    installiert nach $(PREFIX) (Standard: /usr/local, braucht sudo)
 
-VERSION  := 1.1.0
+VERSION  := 1.1.1
 DEBREV   := 1
 ARCH     := $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 PREFIX   ?= /usr/local

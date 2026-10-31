@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define ZD_VERSION "1.1.0"
+#define ZD_VERSION "1.1.1"
 #define ZD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define ZD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define ZD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
