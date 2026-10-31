@@ -1,4 +1,4 @@
-# Mediathek Downloader 1.4.0
+# Mediathek Downloader 1.4.1
 
 Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat – einzelne Folgen, ganze Staffeln
 oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
@@ -19,7 +19,7 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.4.0-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.4.1-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
