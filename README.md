@@ -180,3 +180,10 @@ make deb
 | `src/md_gui.c` | grafische Oberfläche (GTK 3) |
 | `src/md_cli.c` | Terminal-Version |
 | `data/` | Starter, Symbol, Paketbeschreibung |
+
+## Lizenz
+
+Copyright (C) 2026 EureLordschaft008
+
+Dieses Programm steht unter der GNU General Public License, Version 3 oder neuer
+(GPL-3.0-or-later), siehe [LICENSE](LICENSE). Es wird ohne jede Gewähr bereitgestellt.
