@@ -89,6 +89,7 @@ typedef struct {
     char *key, *website, *video, *description, *cover_path;
     gint64 newest;
     bool complete;              /* alle Folgen da (die Startliste enthält nur neue) */
+    bool has_news;              /* Serie: neue Folgen seit dem letzten Download */
     bool loading, select_after_load, cover_requested;
     GdkPixbuf *cover;
     char **genres;              /* Kategorien; NULL = noch nicht bekannt */
@@ -579,6 +580,8 @@ static const char CSS[] =
     ".zd-tile-check { padding: 3px 4px; border-radius: 6px;"
     " background-color: rgba(0, 0, 0, 0.6); }\n"
     ".zd-tile-badges .zd-badge { background-color: rgba(0, 0, 0, 0.75); }\n"
+    ".zd-badge.news, .zd-tile-badges .zd-badge.news { color: white; padding: 1px 7px;"
+    " background-color: @success_color; }\n"
     "button.zd-imdb { min-height: 0; min-width: 0; padding: 0 5px; border: none;"
     " border-radius: 5px; background-image: none; background-color: #f5c518; color: #000000;"
     " font-size: 85%; font-weight: bold; box-shadow: none; }\n"
@@ -1246,9 +1249,47 @@ static bool refresh_groups(GPtrArray *groups)
     return changed;
 }
 
+/* Serien markieren, die seit dem letzten Download neue Folgen bekommen haben. Sender stellen
+ * Folgen vor ihrer Sendezeit online, darum zählt eine Folge erst ab dieser Zeit als neu. */
+static void update_series_news(void)
+{
+    gint64 now = g_get_real_time() / G_USEC_PER_SEC;
+    int count = 0;
+    MdHistoryEntry *entries = md_history_snapshot(&count);
+    GHashTable *latest = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    for (int i = 0; i < count; i++) {
+        char *key = g_utf8_strdown(entries[i].topic, -1);
+        gint64 *known = g_hash_table_lookup(latest, key);
+        if (!known) g_hash_table_insert(latest, g_strdup(key), g_memdup2(&entries[i].finished,
+                                                                        sizeof(gint64)));
+        else *known = MAX(*known, entries[i].finished);
+        g_free(key);
+    }
+    for (guint g = 0; ui.preview && g < ui.preview->len; g++) {
+        Group *group = ui.preview->pdata[g];
+        char *key = g_utf8_strdown(group->name, -1);
+        const gint64 *finished = group->is_film ? NULL : g_hash_table_lookup(latest, key);
+        g_free(key);
+        group->has_news = false;
+        for (guint s = 0; finished && s < group->seasons->len; s++) {
+            const Season *season = group->seasons->pdata[s];
+            for (guint i = 0; i < season->items->len; i++) {
+                const Item *item = season->items->pdata[i];
+                gint64 aired = item->title->timestamp;
+                group->has_news |= item_open(item) && aired > *finished && aired <= now;
+            }
+        }
+    }
+    g_hash_table_destroy(latest);
+    md_history_snapshot_free(entries, count);
+}
+
 static void refresh_statuses(void)
 {
-    if (refresh_groups(ui.preview)) rebuild_results();
+    bool changed = refresh_groups(ui.preview);
+    update_series_news();
+    if (changed) rebuild_results();
+    else update_tiles();
 }
 
 /* gewählte Treffer in Baumreihenfolge */
@@ -1753,6 +1794,14 @@ static void request_rating(Group *group)
     g_thread_unref(g_thread_new("bewertung", rating_thread, job));
 }
 
+/* grünes "!" an Serien mit neuen Folgen */
+static GtkWidget *new_news_badge(void)
+{
+    GtkWidget *badge = new_badge("!", "news");
+    gtk_widget_set_tooltip_text(badge, "Neue Folgen seit dem letzten Download");
+    return badge;
+}
+
 /* Häkchen, Marke und Beschreibung einer Kachel */
 static void update_tile(const Group *group)
 {
@@ -1786,6 +1835,11 @@ static void update_tile(const Group *group)
     if (badge) {
         gtk_box_pack_start(GTK_BOX(group->tile_badges), badge, FALSE, FALSE, 0);
         gtk_widget_show(badge);
+    }
+    if (group->has_news) {
+        GtkWidget *news = new_news_badge();
+        gtk_box_pack_end(GTK_BOX(group->tile_badges), news, FALSE, FALSE, 3);
+        gtk_widget_show(news);
     }
 
     char *sub = group_meta(group, true);
@@ -2188,6 +2242,7 @@ static bool tile_matches(const Group *group, const char *filter)
 static void rebuild_preview(void)
 {
     close_hover();
+    update_series_news();
     for (guint i = 0; ui.preview && i < ui.preview->len; i++) {
         Group *group = ui.preview->pdata[i];
         group->tile_image = group->tile_check = group->tile_sub = group->tile_badges = NULL;
@@ -2419,6 +2474,7 @@ static gboolean on_preview_done(gpointer data)
         rebuild_preview();
         g_ptr_array_free(job->items, TRUE);
         request_all_genres();
+        rebuild_library();
     } else {
         set_label_text(ui.preview_note, job->error ? job->error : "Keine Vorschau verfügbar.");
     }
@@ -2954,6 +3010,16 @@ static void add_library_topic(const char *topic, int count, int missing, gint64 
         gtk_box_pack_start(GTK_BOX(suffix), badge, FALSE, FALSE, 0);
         g_free(text);
     }
+    char *lower = g_utf8_strdown(topic, -1);
+    char *key = g_strdup_printf("S:%s", lower);
+    const Group *series = ui.preview_index ? g_hash_table_lookup(ui.preview_index, key) : NULL;
+    if (series && series->has_news) {
+        GtkWidget *news = new_news_badge();
+        gtk_widget_set_valign(news, GTK_ALIGN_CENTER);
+        gtk_box_pack_start(GTK_BOX(suffix), news, FALSE, FALSE, 0);
+    }
+    g_free(lower);
+    g_free(key);
     if (strcmp(topic, "Filme"))
         gtk_box_pack_start(GTK_BOX(suffix),
                            new_path_button("edit-find-symbolic", "Fehlende Folgen suchen", topic,
