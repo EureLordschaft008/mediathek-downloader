@@ -1,6 +1,7 @@
-# Mediathek Downloader 1.5.0
+# Mediathek Downloader 1.6.0
 
-Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb und 3sat –
+Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb, 3sat und
+Netzkino –
 einzelne Folgen, ganze Staffeln oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
 (`mediathek-downloader`, Aufbau und Optik wie beim AV1-Converter) und als Terminal-Version
 (`mediathek-downloader-cli`, z. B. für lange Läufe in tmux).
@@ -19,7 +20,7 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.5.0-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.6.0-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
@@ -137,8 +138,11 @@ Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt d
 - **Staffeln bei der ARD:** Nennt ein Titel nur „Folge 5“, zählt er zu Staffel 1. Serien ganz ohne
   Nummern wie der Tatort stehen unter „Einzelne Sendungen“.
 - **Andere Sender:** BR, HR, MDR, ARTE und weitere öffentlich-rechtliche Sender sind nicht dabei.
-- **Private Sender und Bezahldienste** gibt es nicht: Sie stehen nicht in der Datenquelle und
-  liefern ihre Inhalte kopiergeschützt, und das Programm umgeht keinen Kopierschutz.
+- **Private Sender und Bezahldienste** gibt es nicht: Sie stehen nicht in der Datenquelle, ihre
+  Player sind auf Kopierschutz ausgelegt, und das Programm umgeht keinen Kopierschutz.
+- **Netzkino** liefert nur Filme, und nur solche ohne Kopierschutz und außerhalb von NetzkinoPlus.
+  Länge und Größe nennt der Dienst nicht, die Qualitätsstufe wirkt dort nicht. Die Dateien sind oft
+  sehr groß, teils über 10 GB. Netzkino finanziert sich über Werbung, die beim Download entfällt.
 - **Titelbilder bei WDR, SWR, NDR und rbb** sind Standbilder aus dem Video, und FSK fehlt dort.
 - **Titellisten** kommen von [MediathekViewWeb](https://mediathekviewweb.de), nicht von den Sendern.
   Ist dieser Dienst nicht erreichbar, gibt es keine Titel.

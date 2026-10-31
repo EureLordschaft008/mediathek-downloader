@@ -129,7 +129,14 @@ static const struct {
     {MD_SOURCE_SWR, "swr", "SWR", "SWR"},
     {MD_SOURCE_NDR, "ndr", "NDR", "NDR"},
     {MD_SOURCE_RBB, "rbb", "RBB", "rbb"},
+    {MD_SOURCE_NETZKINO, NULL, "Netzkino", "Netzkino"},
 };
+
+/* Netzkino steht nicht in der Suche: Filmlisten der eigenen Schnittstelle, ohne NetzkinoPlus */
+#define NETZKINO_API "https://api.netzkino.de.simplecache.net/capi-2.0a/categories/"
+#define NETZKINO_VIDEO "https://pmd.netzkino-seite.netzkino.de/"
+#define NETZKINO_PAGE "https://www.netzkino.de/details/"
+static const int NETZKINO_CATEGORIES[] = {1, 3, 4, 5, 6, 10, 18, 32, 35, 51, 71, 10333};
 
 /* Mediatheken, deren Titel gleich aufgebaut sind */
 #define ZDF_STYLE (MD_SOURCE_ZDF | MD_SOURCE_ZDFNEO)
@@ -817,7 +824,7 @@ static bool title_matches(const MdTitle *t, const MdQuery *query)
 {
     if (!(t->source & (query->sources ? query->sources : MD_SOURCE_ALL))) return false;
     if (!*t->url_high && !*t->url_medium && !*t->url_low) return false;
-    if (t->duration < query->min_minutes * 60) return false;
+    if (t->duration < query->min_minutes * 60 && t->source != MD_SOURCE_NETZKINO) return false;
     if (query->hide_variants && t->is_variant) return false;
     if (query->kind == MD_KIND_FILMS && !t->is_film) return false;
     if (query->kind == MD_KIND_SERIES && (t->is_film ||
@@ -917,6 +924,218 @@ static bool search_source(const char *channel, const MdQuery *query, GPtrArray *
     return ok;
 }
 
+/* Liste aus Texten lesen -> Texte durch Zeilenumbruch getrennt */
+static char *json_read_list(Json *j)
+{
+    GString *out = g_string_new(NULL);
+    json_spaces(j);
+    if (*j->p != '[') {
+        json_skip(j, 4);
+        return g_string_free(out, FALSE);
+    }
+    j->p++;
+    if (json_accept(j, ']')) return g_string_free(out, FALSE);
+    do {
+        json_spaces(j);
+        if (*j->p == '"') {
+            char *text = json_string(j);
+            g_string_append_printf(out, "%s\n", text);
+            g_free(text);
+        } else {
+            json_skip(j, 4);
+        }
+    } while (j->ok && json_accept(j, ','));
+    if (!json_accept(j, ']')) j->ok = false;
+    return g_string_free(out, FALSE);
+}
+
+/* Felder eines Netzkino-Films */
+typedef struct {
+    char *slug, *title, *content, *date, *genres, *thumbnail, *properties;
+    char *stream, *fsk, *image;
+    bool drm;
+} NetzkinoPost;
+
+static void netzkino_post_clear(NetzkinoPost *p)
+{
+    char **fields[] = {&p->slug, &p->title, &p->content, &p->date, &p->genres, &p->thumbnail,
+                       &p->properties, &p->stream, &p->fsk, &p->image};
+    for (size_t i = 0; i < G_N_ELEMENTS(fields); i++) g_clear_pointer(fields[i], g_free);
+}
+
+/* Bereich "custom_fields" */
+static void netzkino_read_fields(Json *j, NetzkinoPost *p)
+{
+    if (!json_accept(j, '{')) {
+        j->ok = false;
+        return;
+    }
+    if (json_accept(j, '}')) return;
+    do {
+        char *key = json_string(j);
+        if (!json_accept(j, ':')) j->ok = false;
+        json_spaces(j);
+        char **text = NULL;
+        if (!strcmp(key, "Streaming")) text = &p->stream;
+        else if (!strcmp(key, "FSK")) text = &p->fsk;
+        else if (!strcmp(key, "featured_img_all_small")) text = &p->image;
+        if (text) {
+            g_free(*text);
+            *text = json_read_list(j);
+        } else if (!strcmp(key, "drm")) {
+            p->drm = !strncmp(j->p, "true", 4);
+            json_skip(j, 4);
+        } else {
+            json_skip(j, 4);
+        }
+        g_free(key);
+    } while (j->ok && json_accept(j, ','));
+    if (!json_accept(j, '}')) j->ok = false;
+}
+
+/* Ein Objekt aus "posts" lesen */
+static void netzkino_read_post(Json *j, NetzkinoPost *p)
+{
+    if (!json_accept(j, '{')) {
+        j->ok = false;
+        return;
+    }
+    if (json_accept(j, '}')) return;
+    do {
+        char *key = json_string(j);
+        if (!json_accept(j, ':')) j->ok = false;
+        json_spaces(j);
+        char **text = NULL, **list = NULL;
+        if (!strcmp(key, "slug")) text = &p->slug;
+        else if (!strcmp(key, "title")) text = &p->title;
+        else if (!strcmp(key, "content")) text = &p->content;
+        else if (!strcmp(key, "date")) text = &p->date;
+        else if (!strcmp(key, "thumbnail")) text = &p->thumbnail;
+        else if (!strcmp(key, "genres")) list = &p->genres;
+        else if (!strcmp(key, "properties")) list = &p->properties;
+        if (text && *j->p == '"') {
+            g_free(*text);
+            *text = json_string(j);
+        } else if (list) {
+            g_free(*list);
+            *list = json_read_list(j);
+        } else if (!strcmp(key, "custom_fields")) {
+            netzkino_read_fields(j, p);
+        } else {
+            json_skip(j, 3);
+        }
+        g_free(key);
+    } while (j->ok && json_accept(j, ','));
+    if (!json_accept(j, '}')) j->ok = false;
+}
+
+/* Merkzettel wie bei den Mediatheken: Bild, FSK, je Zeile eine Kategorie */
+static void netzkino_write_info(const NetzkinoPost *p, const char *website)
+{
+    char *path = cache_file(website, ".info");
+    char *image = p->image && g_str_has_prefix(p->image, "https://") ? g_strdup(p->image) :
+                  g_strdup(p->thumbnail ? p->thumbnail : "");
+    char *end = strchr(image, '\n');
+    if (end) *end = 0;
+    char *fsk = g_strdup(p->fsk ? p->fsk : "");
+    if ((end = strchr(fsk, '\n'))) *end = 0;
+    bool usable = g_str_has_prefix(image, "https://") && !strpbrk(image, " \\'");
+    char *info = g_strdup_printf("%s\n%s%s\n%s", usable ? image : "", *fsk ? "FSK " : "", fsk,
+                                 p->genres ? p->genres : "");
+    g_file_set_contents(path, info, -1, NULL);
+    g_free(info);
+    g_free(fsk);
+    g_free(image);
+    g_free(path);
+}
+
+/* Nur frei verfügbare Filme ohne Kopierschutz aufnehmen; seen verhindert Doppelte */
+static void netzkino_add_post(const NetzkinoPost *p, const MdQuery *query, GPtrArray *out,
+                              GHashTable *seen)
+{
+    if (!p->slug || !p->title || !p->stream || !*p->stream || p->drm) return;
+    if (!p->properties || !strstr(p->properties, "avod\n")) return;
+    if (strpbrk(p->slug, "/ ") || !g_hash_table_add(seen, g_strdup(p->slug))) return;
+    if (query->text && *query->text) {
+        char *a = g_utf8_strdown(p->title, -1), *b = g_utf8_strdown(query->text, -1);
+        bool hit = strstr(a, b) != NULL;
+        g_free(a);
+        g_free(b);
+        if (!hit) return;
+    }
+    char *stream = g_strdup(p->stream);
+    *strchr(stream, '\n') = 0;
+    MdTitle *t = g_new0(MdTitle, 1);
+    t->channel = g_strdup("Netzkino");
+    t->topic = g_strdup("Filme");
+    t->title = g_strdup(p->title);
+    t->description = g_strdup(p->content ? p->content : "");
+    t->website = g_strconcat(NETZKINO_PAGE, p->slug, NULL);
+    char *escaped = g_uri_escape_string(stream, "/", FALSE);        /* "Great Movies/…" */
+    t->url_high = g_strconcat(NETZKINO_VIDEO, escaped, ".mp4", NULL);
+    g_free(escaped);
+    t->url_medium = g_strdup("");
+    t->url_low = g_strdup("");
+    t->url_subtitle = g_strdup("");
+    GDateTime *date = p->date ? g_date_time_new_from_iso8601(p->date, NULL) : NULL;
+    if (date) {
+        t->timestamp = g_date_time_to_unix(date);
+        g_date_time_unref(date);
+    }
+    title_analyse(t);
+    netzkino_write_info(p, t->website);
+    g_ptr_array_add(out, t);
+    g_free(stream);
+}
+
+static void netzkino_parse(const char *reply, const MdQuery *query, GPtrArray *out,
+                           GHashTable *seen)
+{
+    Json j = {reply, true};
+    if (!json_accept(&j, '{')) return;
+    while (j.ok) {
+        char *key = json_string(&j);
+        if (!json_accept(&j, ':')) j.ok = false;
+        if (!strcmp(key, "posts") && json_accept(&j, '[')) {
+            if (!json_accept(&j, ']')) {
+                do {
+                    NetzkinoPost post = {0};
+                    netzkino_read_post(&j, &post);
+                    if (j.ok) netzkino_add_post(&post, query, out, seen);
+                    netzkino_post_clear(&post);
+                } while (j.ok && json_accept(&j, ','));
+                if (!json_accept(&j, ']')) j.ok = false;
+            }
+        } else {
+            json_skip(&j, 2);
+        }
+        g_free(key);
+        if (!json_accept(&j, ',')) break;
+    }
+}
+
+/* Filme von Netzkino holen. Fällt der Dienst aus, bleiben die übrigen Mediatheken nutzbar. */
+static void netzkino_fetch(const MdQuery *query, GPtrArray *out)
+{
+    GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (size_t i = 0; i < G_N_ELEMENTS(NETZKINO_CATEGORIES); i++) {
+        char *url = g_strdup_printf(NETZKINO_API "%d.json?d=www&l=de-DE", NETZKINO_CATEGORIES[i]);
+        char *saved = search_cache_path(url), *reply = NULL, *messages = NULL;
+        char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, url, NULL};
+        if (query->cache == MD_CACHE_REFRESH || !search_cache_read(saved, &reply)) {
+            if (run_capture(argv, &reply, &messages) == 0 && reply)
+                g_file_set_contents(saved, reply, -1, NULL);
+            else md_log("Netzkino nicht erreichbar: %s", url);
+        }
+        if (reply) netzkino_parse(reply, query, out, seen);
+        g_free(url);
+        g_free(saved);
+        g_free(reply);
+        g_free(messages);
+    }
+    g_hash_table_destroy(seen);
+}
+
 /* Beim Stöbern nach Serien: Einzelsendungen ohne Staffelangabe sind keine Serie */
 static void drop_single_shows(GPtrArray *titles)
 {
@@ -942,8 +1161,10 @@ GPtrArray *md_search(const MdQuery *query, const volatile gint *cancel, bool *tr
     if (truncated) *truncated = false;
     int sources = query->sources ? query->sources : MD_SOURCE_ALL;
     for (size_t i = 0; ok && i < G_N_ELEMENTS(SOURCES); i++)
-        if (sources & SOURCES[i].source)
+        if ((sources & SOURCES[i].source) && SOURCES[i].query)
             ok = search_source(SOURCES[i].query, query, raw, cancel, truncated, error);
+    if (ok && (sources & MD_SOURCE_NETZKINO) && query->kind != MD_KIND_SERIES)
+        netzkino_fetch(query, raw);
     if (!ok) {
         g_ptr_array_free(raw, TRUE);
         return NULL;
@@ -1445,6 +1666,12 @@ static char *page_gone_info(const char *website)
  * Einmal geholt bleibt er liegen. NULL = Seite nicht erreichbar. */
 static char *page_info(const char *website)
 {
+    if (g_str_has_prefix(website, NETZKINO_PAGE)) {     /* schon mit der Filmliste gespeichert */
+        char *path = cache_file(website, ".info"), *saved = NULL;
+        g_file_get_contents(path, &saved, NULL, NULL);
+        g_free(path);
+        return saved;
+    }
     bool ard = g_str_has_prefix(website, COVER_ARD_PAGE);
     if (!ard && !g_str_has_prefix(website, COVER_PAGE_PREFIX) &&
         !g_str_has_prefix(website, COVER_3SAT_PAGE))

@@ -49,14 +49,16 @@
 #define FOOTER_NEWS 1
 #define FOOTER_COUNT 2
 #define NO_GENRE "Ohne Kategorie"
-#define MD_SOURCE_OLD_ALL 7     /* "Alle" bis Version 1.4 */
+#define MD_SOURCE_ALL_1_4 7     /* so stand "Alle" früher in den Einstellungen */
+#define MD_SOURCE_ALL_1_5 511
 #define IMDB_THREADS 2
 #define ALL_LANGUAGES "Alle Sprachen"
-#define SOURCE_COUNT 9
+#define SOURCE_COUNT 10
 
 static const int SOURCE_BITS[SOURCE_COUNT] = {MD_SOURCE_ZDF, MD_SOURCE_ZDFNEO, MD_SOURCE_ARD,
                                               MD_SOURCE_ONE, MD_SOURCE_WDR, MD_SOURCE_SWR,
-                                              MD_SOURCE_NDR, MD_SOURCE_RBB, MD_SOURCE_3SAT};
+                                              MD_SOURCE_NDR, MD_SOURCE_RBB, MD_SOURCE_3SAT,
+                                              MD_SOURCE_NETZKINO};
 static const char *const KIND_TEXT[3] = {"Alles", "Filme", "Serien"};
 static const char *const QUALITY_TEXT[3] = {"Hoch – 1080p (ca. 4,5 GB je 90 min)",
                                             "Mittel (ca. 2,3 GB je 90 min)",
@@ -671,7 +673,8 @@ static void settings_load(void)
     c->limit_mb = CLAMP(settings_int(file, "LimitMBs", 10, 1, 1000), 1, 1000);
     c->limit_on = settings_bool(file, "LimitAktiv", false);
     c->sources = settings_int(file, "Mediatheken", MD_SOURCE_ALL, 1, MD_SOURCE_ALL);
-    if (c->sources == MD_SOURCE_OLD_ALL) c->sources = MD_SOURCE_ALL;
+    if (c->sources == MD_SOURCE_ALL_1_4 || c->sources == MD_SOURCE_ALL_1_5)
+        c->sources = MD_SOURCE_ALL;
     c->convert = settings_bool(file, "AV1", false);
     c->keep_original = settings_bool(file, "OriginalBehalten", false);
     c->show_signed = settings_bool(file, "Gebaerdensprache", false);
@@ -1050,7 +1053,9 @@ static char *item_subtitle(const MdTitle *t)
     GString *s = g_string_new(md_source_label(t->source));
     g_string_append(s, " · ");
     if (t->season >= 0) g_string_append_printf(s, "S%02dE%02d · ", t->season, t->episode);
-    g_string_append_printf(s, "%d min · %s · ca. %s", t->duration / 60, date, size);
+    if (t->duration)
+        g_string_append_printf(s, "%d min · %s · ca. %s", t->duration / 60, date, size);
+    else g_string_append(s, date);
     if (t->audio->len > 1 || t->subtitles->len) {
         g_string_append(s, " · ");
         for (guint i = 0; i < t->audio->len; i++)
@@ -1735,7 +1740,8 @@ static char *group_meta(const Group *group, bool short_form)
     if (group->fsk) g_string_append_printf(s, "%s · ", group->fsk);
     char *date = format_date(group->newest);
     if (group->is_film) {
-        g_string_append_printf(s, "%d min · %s", seconds / MAX(c.total, 1) / 60, date);
+        if (seconds) g_string_append_printf(s, "%d min · ", seconds / MAX(c.total, 1) / 60);
+        g_string_append(s, date);
     } else if (group->complete && short_form) {
         g_string_append_printf(s, "%d %s · %s", c.total, plural(c.total, "Folge", "Folgen"), date);
     } else if (group->complete) {
