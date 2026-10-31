@@ -75,7 +75,13 @@
 #define GENRE_TEXT_LENGTH 120   /* so viel der ARD-Beschreibung zählt für die Kategorie */
 #define IMDB_API "https://v3.sg.media-imdb.com/suggestion/x/"
 #define IMDB_RATINGS_URL "https://datasets.imdbws.com/title.ratings.tsv.gz"
+#define IMDB_GENRES_URL "https://datasets.imdbws.com/title.basics.tsv.gz"
+#define IMDB_GENRES_SECONDS (30 * 24 * 3600)
+#define IMDB_GENRES_MIN_SIZE (1024 * 1024)
 #define IMDB_RATINGS_SECONDS (7 * 24 * 3600)
+#define PAGE_INFO_UNKNOWN "\n\n"                 /* nichts gefunden, gilt nie als erledigt */
+#define COVER_FRAME_SECONDS "180"                /* hinter dem Vorspann */
+#define COVER_FRAME_WIDTH "384"
 #define CURL_HTTP_ERROR 22                       /* Exit-Code von curl -f bei 4xx/5xx */
 #define SEARCH_CACHE_SECONDS (6 * 3600)         /* so lange gilt die Liste der Vorschau */
 #define PAGE_SIZE 500               /* Einträge je Anfrage */
@@ -1342,6 +1348,7 @@ static bool page_info_stale(const char *info, const char *path)
     g_strfreev(lines);
     GStatBuf stat_buf;
     if (complete) return false;
+    if (!strcmp(info, PAGE_INFO_UNKNOWN)) return true;
     return g_stat(path, &stat_buf) != 0 ||
            time(NULL) - stat_buf.st_mtime >= PAGE_RECHECK_SECONDS;
 }
@@ -1356,7 +1363,6 @@ static void genres_from_text(const char *text, GString *out)
         {"komödie", "Komödie"}, {"drama", "Drama"}, {"doku", "Dokumentation"},
         {"reportage", "Reportage"}, {"tagesschau", "Nachrichten"},
         {"tagesthemen", "Nachrichten"}, {"sportschau", "Sport"}, {"kabarett", "Kabarett"},
-        {"spielfilm", "Spielfilm"}, {"fernsehfilm", "Spielfilm"},
     };
     char *lower = g_utf8_strdown(text, -1);
     for (size_t i = 0; i < G_N_ELEMENTS(WORDS); i++) {
@@ -1416,6 +1422,15 @@ static char *page_address(const char *website)
     return g_strdup(website);
 }
 
+/* Merkzettel einer Seite, die es nicht mehr gibt. Die Adresse nennt bei 3sat die Kategorie. */
+static char *page_gone_info(const char *website)
+{
+    GString *out = g_string_new("\n\n");
+    if (g_str_has_prefix(website, COVER_3SAT_PAGE)) genres_from_text(website, out);
+    if (out->len == 2) g_string_append_c(out, '\n');
+    return g_string_free(out, FALSE);
+}
+
 /* Merkzettel zur Seite website: Bildadresse, FSK, danach je Zeile eine Kategorie.
  * Einmal geholt bleibt er liegen. NULL = Seite nicht erreichbar. */
 static char *page_info(const char *website)
@@ -1430,17 +1445,24 @@ static char *page_info(const char *website)
         return info;
     }
     char *address = page_address(website);
-    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, address, NULL};
+    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "--retry", "2", "-A", USER_AGENT,
+                    "-w", "\n%{http_code}", address, NULL};
     char *reply = NULL, *messages = NULL;
     int rc = run_capture(argv, &reply, &messages);
     g_free(address);
-    if (rc == CURL_HTTP_ERROR) {        /* Seite ist weg: nicht bei jedem Start fragen */
-        g_file_set_contents(path, "\n\n", -1, NULL);
-    } else if (rc == 0 && reply) {
+    const char *code = reply ? strrchr(reply, '\n') : NULL;
+    if (rc == CURL_HTTP_ERROR && code && (!strcmp(code, "\n404") || !strcmp(code, "\n410"))) {
+        g_free(info);                   /* Seite ist weg: nicht bei jedem Start fragen */
+        info = page_gone_info(website);
+        g_file_set_contents(path, info, -1, NULL);
+    } else if (rc != 0) {               /* vorübergehend: beim nächsten Start neu versuchen */
+        md_log("Seite nicht geladen (curl %d%s): %s", rc, code ? code : "", website);
+    } else if (reply) {
         GString *fresh = g_string_new(NULL);
         if (ard) ard_page_info(reply, fresh);
         else html_page_info(website, reply, fresh);
-        g_file_set_contents(path, fresh->str, (gssize)fresh->len, NULL);
+        if (strcmp(fresh->str, PAGE_INFO_UNKNOWN))
+            g_file_set_contents(path, fresh->str, (gssize)fresh->len, NULL);
         g_free(info);
         info = g_string_free(fresh, FALSE);
     }
@@ -1448,6 +1470,32 @@ static char *page_info(const char *website)
     g_free(messages);
     g_free(path);
     return info;
+}
+
+/* Genres von IMDb und aus den Mediatheken auf Deutsch, jede nur einmal; NULL-Ziel = weglassen */
+static void add_genre(GPtrArray *genres, const char *name)
+{
+    static const struct {
+        const char *from, *to;
+    } NAMES[] = {
+        {"Spielfilm", NULL},    /* stand bis 1.3.0 im Zwischenspeicher, sagt nichts über den Film */
+        {"Short", NULL}, {"Adult", NULL},
+        {"Comedy", "Komödie"}, {"Romance", "Romanze"}, {"Crime", "Krimi"},
+        {"Documentary", "Dokumentation"}, {"Family", "Familie"}, {"Adventure", "Abenteuer"},
+        {"Sci-Fi", "Science-Fiction"}, {"Science Fiction", "Science-Fiction"},
+        {"Biography", "Biografie"}, {"History", "Geschichte"}, {"War", "Krieg"},
+        {"Music", "Musik"}, {"News", "Nachrichten"}, {"Talk-Show", "Talk"},
+        {"Game-Show", "Show"}, {"Reality-TV", "Show"}, {"Film-Noir", "Film Noir"},
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(NAMES); i++) {
+        if (strcmp(name, NAMES[i].from)) continue;
+        name = NAMES[i].to;
+        break;
+    }
+    if (!name) return;
+    for (guint i = 0; i < genres->len; i++)
+        if (!strcmp(genres->pdata[i], name)) return;
+    g_ptr_array_add(genres, g_strdup(name));
 }
 
 MdPageInfo *md_page_info(const char *website)
@@ -1459,7 +1507,7 @@ MdPageInfo *md_page_info(const char *website)
     GPtrArray *genres = g_ptr_array_new();
     for (int i = 0; lines[i]; i++) {
         if (i == 1 && *lines[i]) result->fsk = g_strdup(lines[i]);
-        if (i >= 2 && *lines[i]) g_ptr_array_add(genres, g_strdup(lines[i]));
+        if (i >= 2 && *lines[i]) add_genre(genres, lines[i]);
     }
     g_ptr_array_add(genres, NULL);
     result->genres = (char **)g_ptr_array_free(genres, FALSE);
@@ -1489,15 +1537,24 @@ char *md_default_cover_dir(void)
     return g_build_filename(md_app_dir(), "bilder", NULL);
 }
 
-char *md_cover_file(const char *website)
+/* Die Seite nennt kein Bild: Standbild aus dem Video holen */
+static void cover_from_video(const char *video, const char *path)
+{
+    char *tmp = g_strconcat(path, ".part", NULL);
+    char *argv[] = {"ffmpeg", "-nostdin", "-v", "error", "-rw_timeout", "20000000",
+                    "-ss", COVER_FRAME_SECONDS, "-i", (char *)video, "-frames:v", "1",
+                    "-vf", "scale=" COVER_FRAME_WIDTH ":-2", "-q:v", "4", "-f", "image2", "-y",
+                    tmp, NULL};
+    if (run_capture(argv, NULL, NULL) != 0 || file_size(tmp) <= 0 || g_rename(tmp, path) != 0)
+        g_unlink(tmp);
+    g_free(tmp);
+}
+
+char *md_cover_file(const char *website, const char *video)
 {
     char *info = page_info(website);
-    if (!info || *info == '\n') {
-        g_free(info);
-        return NULL;
-    }
     char *path = cache_file(website, ".jpg");
-    if (file_size(path) <= 0) {
+    if (file_size(path) <= 0 && info && *info != '\n') {
         *strchr(info, '\n') = 0;
         char *tmp = g_strconcat(path, ".part", NULL), *messages = NULL;
         char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, "-o", tmp, info,
@@ -1507,6 +1564,7 @@ char *md_cover_file(const char *website)
         g_free(tmp);
     }
     g_free(info);
+    if (file_size(path) <= 0 && video && *video) cover_from_video(video, path);
     if (file_size(path) > 0) return path;
     g_free(path);
     return NULL;
@@ -1668,6 +1726,75 @@ static char *imdb_ratings_file(void)
     g_free(packed);
     g_free(plain);
     return path;
+}
+
+/* Datendatei der Titel laden und auf Kennung und Genres eindampfen -> Pfad. Sie ist groß und
+ * ändert sich kaum, darum nur selten. Scheitert es, bleibt es für diesen Programmlauf dabei. */
+static char *imdb_genres_file(void)
+{
+    static GMutex lock;
+    static bool failed;
+    static const char SCRIPT[] =
+        "gzip -dc \"$1\" | grep -E '^tt[0-9]+\\s(movie|tvMovie|tvSeries|tvMiniSeries)\\s' "
+        "| cut -f1,9 | grep -v '\\\\N$' > \"$2\"";
+    char *dir = cache_dir();
+    char *path = g_build_filename(dir, "imdb-kategorien.tsv", NULL);
+    char *packed = g_strconcat(path, ".part.gz", NULL), *plain = g_strconcat(path, ".part", NULL);
+    GStatBuf stat_buf;
+    g_mutex_lock(&lock);
+    if (!failed &&
+        (g_stat(path, &stat_buf) != 0 || time(NULL) - stat_buf.st_mtime >= IMDB_GENRES_SECONDS)) {
+        char *fetch[] = {"curl", "-sS", "-f", "-L", "-m", "1800", "-A", USER_AGENT, "-o", packed,
+                         IMDB_GENRES_URL, NULL};
+        char *unpack[] = {"sh", "-c", (char *)SCRIPT, "sh", packed, plain, NULL};
+        char *messages = NULL, *more = NULL;
+        failed = run_capture(fetch, NULL, &messages) != 0 ||
+                 run_capture(unpack, NULL, &more) != 0 || file_size(plain) < IMDB_GENRES_MIN_SIZE ||
+                 g_rename(plain, path) != 0;
+        if (failed) md_log("IMDb-Kategorien nicht geladen");
+        g_unlink(packed);
+        g_unlink(plain);
+        g_free(messages);
+        g_free(more);
+    }
+    g_mutex_unlock(&lock);
+    g_free(dir);
+    g_free(packed);
+    g_free(plain);
+    return path;
+}
+
+char **md_imdb_genres(const char *name, bool is_film)
+{
+    int year = 0;
+    char *id = imdb_lookup(name, is_film, &year);
+    if (!id) return NULL;
+    char *path = imdb_genres_file();
+    GMappedFile *file = g_mapped_file_new(path, FALSE, NULL);
+    g_free(path);
+    GPtrArray *genres = g_ptr_array_new();
+    const char *text = file ? g_mapped_file_get_contents(file) : NULL;
+    gsize length = file ? g_mapped_file_get_length(file) : 0;
+    char *key = g_strdup_printf("%s\t", id);       /* Zeile "tt5362988<Tab>Crime,Drama" */
+    for (const char *p = text; p && p < text + length;) {
+        const char *hit = g_strstr_len(p, text + length - p, key);
+        if (!hit) break;
+        p = hit + 1;
+        if (hit != text && hit[-1] != '\n') continue;
+        const char *start = hit + strlen(key);
+        const char *end = memchr(start, '\n', (gsize)(text + length - start));
+        char *line = g_strndup(start, end ? (gsize)(end - start) : 0);
+        char **names = g_strsplit(line, ",", -1);
+        for (char **n = names; *n; n++) add_genre(genres, *n);
+        g_strfreev(names);
+        g_free(line);
+        break;
+    }
+    g_ptr_array_add(genres, NULL);
+    g_free(key);
+    g_free(id);
+    if (file) g_mapped_file_unref(file);
+    return (char **)g_ptr_array_free(genres, FALSE);
 }
 
 /* Zeile "tt5362988<Tab>7.7<Tab>322319" suchen */

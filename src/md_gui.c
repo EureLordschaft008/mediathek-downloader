@@ -1,20 +1,19 @@
 /*
  * Mediathek Downloader – grafische Oberfläche (GTK 3)
  * ===================================================
- * Aufbau und Optik wie beim AV1-Converter. Fünf Seiten, oben umschaltbar:
- *   Vorschau       neue Filme und Serien als Kacheln mit Bild; Häkchen sammeln eine Auswahl
- *   Suche          Treffer als Baum Serie -> Staffel -> Folge; jede Ebene hat ein Häkchen, und
- *                  jede Folge zeigt, ob sie schon geladen ist
+ * Aufbau und Optik wie beim AV1-Converter. Vier Seiten, oben umschaltbar:
+ *   Vorschau       Filme und Serien als Kacheln mit Bild; Häkchen sammeln eine Auswahl, die
+ *                  Detailansicht zeigt Serie -> Staffel -> Folge mit dem Stand jeder Folge
  *   Downloads      Warteschlange mit Pause, Fortsetzen und Tempolimit
  *   Bibliothek     alles, was schon geladen wurde, nach Sendung sortiert
  *   Einstellungen  Speicherort, Qualität, AV1
  *
- * Suche läuft in einem eigenen Thread, das Ergebnis kommt über g_idle_add() in den
+ * Die Startliste läuft in einem eigenen Thread, das Ergebnis kommt über g_idle_add() in den
  * GTK-Hauptthread. Die Warteschlange arbeitet in der Engine (md_core.c); ein Timer holt alle
  * 500 ms den Stand ab. Der gesamte Zustand der Oberfläche liegt in der Struktur "ui".
  *
  * Aufbau dieser Datei: kleine Helfer – Einstellungen – Trefferbaum – Spurenauswahl –
- * Seite Suche – Seite Vorschau – Seite Downloads – Seite Bibliothek – Seite Einstellungen –
+ * Seite Vorschau – Seite Downloads – Seite Bibliothek – Seite Einstellungen –
  * Fenster, Menü, Programmstart
  *
  * Aufruf:
@@ -45,9 +44,11 @@
 #define COVER_THREADS 4
 #define HOVER_DELAY_MS 500     /* so lange ruht die Maus auf der Kachel bis zum Popup */
 #define GENRE_TICKS 4           /* neue Kategorien alle so vielen Timer-Schläge zeigen */
-#define FOOTER_SEARCH 0
-#define FOOTER_PREVIEW 1
-#define FOOTER_COUNT 2
+#define FOOTER_PREVIEW 0
+#define FOOTER_COUNT 1
+#define NO_GENRE "Ohne Kategorie"
+#define IMDB_THREADS 2
+#define ALL_LANGUAGES "Alle Sprachen"
 #define SOURCE_COUNT 3
 
 static const int SOURCE_BITS[SOURCE_COUNT] = {MD_SOURCE_ZDF, MD_SOURCE_ARD, MD_SOURCE_3SAT};
@@ -67,7 +68,6 @@ typedef struct {
     char *path;                 /* vorhandene Datei */
     MdStatus status;
     bool selected;
-    bool in_preview;            /* die Vorschau filtert ganze Kacheln, nicht einzelne Folgen */
 } Item;
 
 typedef struct {
@@ -86,12 +86,13 @@ typedef struct {
     bool expanded;
     int source;                 /* MD_SOURCE_* */
     /* nur Vorschau */
-    char *key, *website, *description, *cover_path;
+    char *key, *website, *video, *description, *cover_path;
     gint64 newest;
     bool complete;              /* alle Folgen da (die Startliste enthält nur neue) */
     bool loading, select_after_load, cover_requested;
     GdkPixbuf *cover;
     char **genres;              /* Kategorien; NULL = noch nicht bekannt */
+    char **imdb_genres;         /* von IMDb, warten auf die der Seite */
     char *fsk;
     MdImdbInfo imdb;
     int imdb_state;             /* IMDB_UNKNOWN … */
@@ -113,15 +114,12 @@ typedef struct {
     int limit;                  /* angezeigte Zeilen */
 } ResultTree;
 
-/* eine Suche im Hintergrund */
+/* Kategorien eines Titels von IMDb */
 typedef struct {
-    gint cancel;
-    MdQuery query;
-    char *text, *dir;
-    GPtrArray *items;           /* Item* */
-    char *error;
-    bool truncated;
-} SearchJob;
+    char *key, *name;
+    bool is_film;
+    char **genres;
+} GenreJob;
 
 /* Startliste der Vorschau im Hintergrund */
 typedef struct {
@@ -143,7 +141,7 @@ typedef struct {
 
 /* Bild und Kategorien eines Titels im Hintergrund */
 typedef struct {
-    char *key, *website, *path;
+    char *key, *website, *video, *path;
     bool background;            /* nur Kategorien; sichtbare Kacheln gehen vor */
     GdkPixbuf *pixbuf;
     MdPageInfo *info;
@@ -185,18 +183,15 @@ typedef struct {
     bool quitting, gpu_ok;
     guint inhibit_cookie;
 
-    /* Suche */
-    GtkWidget *search_entry, *kind_combo, *filter_combo, *search_button, *search_spinner;
-    GtkWidget *search_note, *select_missing_button;
+    /* Fußzeile und Mediatheken */
     GtkWidget *selection_labels[FOOTER_COUNT], *target_labels[FOOTER_COUNT];
     GtkWidget *download_buttons[FOOTER_COUNT];
     GtkWidget *source_buttons[FOOTER_COUNT][SOURCE_COUNT + 1];  /* zuletzt "Alle" */
-    SearchJob *search_job;
-    ResultTree search_tree;
-    bool updating_checks, has_searched;
+    bool updating_checks;
 
     /* Vorschau */
     GtkWidget *preview_search, *preview_kind, *preview_filter, *preview_spinner, *preview_note;
+    GtkWidget *preview_language;
     GtkWidget *genre_box, *genre_all;
     GHashTable *genre_chips;    /* Kategorie -> GtkToggleButton */
     char *active_genre;         /* NULL = alle */
@@ -205,7 +200,7 @@ typedef struct {
     GtkWidget *film_title, *film_box, *film_more, *series_title, *series_box, *series_more;
     GPtrArray *preview;         /* Group*, neueste zuerst */
     GHashTable *preview_index;  /* Group.key -> Group* */
-    GThreadPool *cover_pool;
+    GThreadPool *cover_pool, *imdb_pool;
     int film_limit, series_limit, series_loading;
     bool preview_busy, preview_refreshed;
     ResultTree detail_tree;     /* Liste der offenen Detailansicht */
@@ -238,7 +233,6 @@ static void update_tiles(void);
 static void update_genres(void);
 static void rebuild_library(void);
 static void update_selection(void);
-static void start_search(void);
 
 /* ---------------------------------------------------------------------------
  * Kleine Helfer
@@ -724,9 +718,11 @@ static void group_free(gpointer data)
     g_free(group->name);
     g_free(group->key);
     g_free(group->website);
+    g_free(group->video);
     g_free(group->description);
     g_free(group->cover_path);
     g_strfreev(group->genres);
+    g_strfreev(group->imdb_genres);
     g_free(group->fsk);
     g_clear_object(&group->cover);
     g_ptr_array_free(group->seasons, TRUE);
@@ -739,19 +735,9 @@ static bool item_open(const Item *item)
     return item->status != MD_STATUS_DONE && item->status != MD_STATUS_QUEUED;
 }
 
-/* passt der Treffer zum Filter "Anzeigen"? */
-static bool item_visible(const Item *item)
-{
-    if (item->in_preview) return true;
-    int filter = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.filter_combo));
-    if (filter == FILTER_MISSING) return item_open(item);
-    if (filter == FILTER_DONE) return item->status == MD_STATUS_DONE;
-    return true;
-}
-
 /* Zähler einer Staffel oder Serie */
 typedef struct {
-    int total, visible, open, done, queued, selected;
+    int total, open, done, queued, selected;
 } Counts;
 
 static void counts_add_season(Counts *c, const Season *season)
@@ -759,7 +745,6 @@ static void counts_add_season(Counts *c, const Season *season)
     for (guint i = 0; i < season->items->len; i++) {
         const Item *item = season->items->pdata[i];
         c->total++;
-        c->visible += item_visible(item);
         c->open += item_open(item);
         c->done += item->status == MD_STATUS_DONE;
         c->queued += item->status == MD_STATUS_QUEUED;
@@ -777,7 +762,7 @@ static void season_select(Season *season, bool selected)
 {
     for (guint i = 0; i < season->items->len; i++) {
         Item *item = season->items->pdata[i];
-        if (item_open(item) && item_visible(item)) item->selected = selected;
+        if (item_open(item)) item->selected = selected;
     }
 }
 
@@ -803,11 +788,6 @@ static int compare_seasons(gconstpointer a, gconstpointer b)
     return x - y;
 }
 
-static int compare_groups(gconstpointer a, gconstpointer b)
-{
-    return g_utf8_collate((*(Group *const *)a)->name, (*(Group *const *)b)->name);
-}
-
 /* Staffel einer Gruppe holen oder anlegen */
 static Season *group_season(Group *group, int number)
 {
@@ -822,16 +802,36 @@ static Season *group_season(Group *group, int number)
     return season;
 }
 
-/* Trefferliste zum Baum ordnen; übernimmt die Items -> Group* */
+/* Steht derselbe Film oder dieselbe Folge schon aus einer anderen Mediathek in der Gruppe? */
+static bool item_duplicate(GHashTable *seen, const Group *group, const MdTitle *t)
+{
+    char *key = t->is_film ? g_strdup(group->key)
+                : t->season >= 0 && t->episode >= 0
+                    ? g_strdup_printf("%s:S%dE%d", group->key, t->season, t->episode)
+                    : g_strdup_printf("%s:%s", group->key, t->name);
+    gpointer source = g_hash_table_lookup(seen, key);
+    if (source) {
+        g_free(key);
+        return GPOINTER_TO_INT(source) != t->source;
+    }
+    g_hash_table_insert(seen, key, GINT_TO_POINTER(t->source));
+    return false;
+}
+
+/* Trefferliste zum Baum ordnen; übernimmt die Items -> Group*. Gleiche Titel aus mehreren
+ * Mediatheken ergeben eine Gruppe, group->source nennt dann alle. */
 static GPtrArray *group_items(GPtrArray *items)
 {
     GPtrArray *groups = g_ptr_array_new_with_free_func(group_free);
     GHashTable *by_name = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint i = 0; i < items->len; i++) {
         Item *item = items->pdata[i];
         const MdTitle *t = item->title;
         const char *name = t->is_film ? t->name : t->topic;
-        char *key = g_strdup_printf("%d:%c:%s", t->source, t->is_film ? 'F' : 'S', name);
+        char *lower = g_utf8_strdown(name, -1);
+        char *key = g_strdup_printf("%c:%s", t->is_film ? 'F' : 'S', lower);
+        g_free(lower);
         Group *group = g_hash_table_lookup(by_name, key);
         if (!group) {
             group = g_new0(Group, 1);
@@ -839,23 +839,30 @@ static GPtrArray *group_items(GPtrArray *items)
             group->is_film = t->is_film;
             group->seasons = g_ptr_array_new_with_free_func(season_free);
             group->key = g_strdup(key);
-            group->source = t->source;
             g_ptr_array_add(groups, group);
             g_hash_table_insert(by_name, g_strdup(key), group);
         }
         g_free(key);
+        group->source |= t->source;
+        if (item_duplicate(seen, group, t)) {
+            item_free(item);
+            continue;
+        }
         g_ptr_array_add(group_season(group, t->season)->items, item);
         if (t->timestamp >= group->newest) {
             group->newest = t->timestamp;
             if (*t->website) {
                 g_free(group->website);
                 group->website = g_strdup(t->website);
+                g_free(group->video);
+                group->video = g_strdup(md_title_url(t, MD_QUALITY_LOW));
             }
             g_free(group->description);
             group->description = g_strdup(t->description);
         }
     }
     g_hash_table_destroy(by_name);
+    g_hash_table_destroy(seen);
     for (guint i = 0; i < groups->len; i++) {
         Group *group = groups->pdata[i];
         g_ptr_array_sort(group->seasons, compare_seasons);
@@ -868,15 +875,16 @@ static GPtrArray *group_items(GPtrArray *items)
     return groups;
 }
 
-/* Ergebnis der Suche übernehmen */
-static void build_groups(GPtrArray *items)
+static void add_items(GPtrArray *items, GPtrArray *titles, const char *dir)
 {
-    if (ui.search_tree.groups) g_ptr_array_free(ui.search_tree.groups, TRUE);
-    ui.search_tree.groups = group_items(items);
-    g_ptr_array_sort(ui.search_tree.groups, compare_groups);
-    if (ui.search_tree.groups->len == 1)
-        ((Group *)ui.search_tree.groups->pdata[0])->expanded = true;
-    ui.search_tree.limit = RESULT_ROWS_BATCH;
+    for (guint i = 0; i < titles->len; i++) {
+        Item *item = g_new0(Item, 1);
+        item->title = titles->pdata[i];
+        item->status = md_title_status(item->title, dir, &item->path);
+        g_ptr_array_add(items, item);
+    }
+    g_ptr_array_set_free_func(titles, NULL);
+    g_ptr_array_free(titles, TRUE);
 }
 
 /* Marke zum Stand eines Treffers */
@@ -931,7 +939,6 @@ static void update_tree_checks(const ResultTree *tree)
 static void update_checks(void)
 {
     ui.updating_checks = true;
-    update_tree_checks(&ui.search_tree);
     update_tree_checks(&ui.detail_tree);
     update_tiles();
     ui.updating_checks = false;
@@ -1068,7 +1075,24 @@ static void add_item_row(ResultTree *tree, Item *item, int depth)
 }
 
 /* Überschriftszeile einer Staffel */
-static void add_season_row(ResultTree *tree, Season *season)
+/* Folgen, die laut Nummerierung fehlen. Ein fehlendes Ende der Staffel lässt sich nicht erkennen. */
+static int season_gaps(const Season *season)
+{
+    GHashTable *numbers = g_hash_table_new(g_direct_hash, g_direct_equal);
+    int highest = 0;
+    for (guint i = 0; i < season->items->len; i++) {
+        int episode = ((const Item *)season->items->pdata[i])->title->episode;
+        if (episode <= 0) continue;
+        g_hash_table_add(numbers, GINT_TO_POINTER(episode));
+        highest = MAX(highest, episode);
+    }
+    int gaps = highest - (int)g_hash_table_size(numbers);
+    g_hash_table_destroy(numbers);
+    return gaps;
+}
+
+/* complete: alle Folgen geladen, nur dann sind Lücken echt */
+static void add_season_row(ResultTree *tree, Season *season, bool complete)
 {
     Counts c = {0};
     counts_add_season(&c, season);
@@ -1077,7 +1101,10 @@ static void add_season_row(ResultTree *tree, Season *season)
     ref->data = season;
     char *title = season->number >= 0 ? g_strdup_printf("Staffel %d", season->number)
                                       : g_strdup("Einzelne Sendungen");
-    char *subtitle = g_strdup_printf("%d %s", c.total, plural(c.total, "Folge", "Folgen"));
+    int gaps = complete && season->number >= 0 ? season_gaps(season) : 0;
+    char *subtitle = gaps ? g_strdup_printf("⚠ %d %s, %d nicht in der Mediathek", c.total,
+                                            plural(c.total, "Folge", "Folgen"), gaps)
+                          : g_strdup_printf("%d %s", c.total, plural(c.total, "Folge", "Folgen"));
     add_result_row(tree, ref, title, subtitle, row_prefix(ref, true, season->expanded),
                    counts_badge(&c), 1, true);
     g_free(title);
@@ -1153,7 +1180,6 @@ static void rebuild_tree(ResultTree *tree)
         Group *group = tree->groups->pdata[g];
         Counts c = {0};
         counts_add_group(&c, group);
-        if (!c.visible) continue;
         if (rows >= tree->limit) {
             more = true;
             break;
@@ -1170,15 +1196,13 @@ static void rebuild_tree(ResultTree *tree)
             Season *season = group->seasons->pdata[s];
             Counts sc = {0};
             counts_add_season(&sc, season);
-            if (!sc.visible) continue;
             if (!flat) {
-                add_season_row(tree, season);
+                add_season_row(tree, season, group->complete);
                 rows++;
             }
             if (!flat && !season->expanded) continue;
             for (guint i = 0; i < season->items->len; i++) {
                 Item *item = season->items->pdata[i];
-                if (!item_visible(item)) continue;
                 if (rows >= tree->limit) {
                     more = true;
                     break;
@@ -1189,15 +1213,13 @@ static void rebuild_tree(ResultTree *tree)
         }
     }
     if (more) add_note_row(tree, "Weitere anzeigen …", true);
-    else if (!rows) add_note_row(tree, ui.has_searched ? "Keine passenden Einträge."
-                                 : "Suchbegriff eingeben oder gleich auf „Suchen“ klicken.", false);
+    else if (!rows) add_note_row(tree, "Keine passenden Einträge.", false);
     gtk_widget_show_all(tree->list);
     update_checks();
 }
 
 static void rebuild_results(void)
 {
-    rebuild_tree(&ui.search_tree);
     if (ui.detail_tree.list) rebuild_tree(&ui.detail_tree);
 }
 
@@ -1226,12 +1248,10 @@ static bool refresh_groups(GPtrArray *groups)
 
 static void refresh_statuses(void)
 {
-    bool changed = refresh_groups(ui.search_tree.groups);
-    changed |= refresh_groups(ui.preview);
-    if (changed) rebuild_results();
+    if (refresh_groups(ui.preview)) rebuild_results();
 }
 
-/* gewählte Treffer in Baumreihenfolge; derselbe Titel kann in Suche und Vorschau stehen */
+/* gewählte Treffer in Baumreihenfolge */
 static void collect_from(GPtrArray *out, GHashTable *seen, GPtrArray *groups)
 {
     for (guint g = 0; groups && g < groups->len; g++) {
@@ -1248,23 +1268,12 @@ static void collect_from(GPtrArray *out, GHashTable *seen, GPtrArray *groups)
     }
 }
 
-/* alle gewählten Treffer aus Suche und Vorschau */
+/* alle gewählten Treffer der Vorschau */
 static GPtrArray *collect_selected(void)
 {
     GPtrArray *out = g_ptr_array_new();
     GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
     collect_from(out, seen, ui.preview);
-    collect_from(out, seen, ui.search_tree.groups);
-    g_hash_table_destroy(seen);
-    return out;
-}
-
-/* Auswahl nur der Seite Suche */
-static GPtrArray *collect_search_selected(void)
-{
-    GPtrArray *out = g_ptr_array_new();
-    GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
-    collect_from(out, seen, ui.search_tree.groups);
     g_hash_table_destroy(seen);
     return out;
 }
@@ -1396,142 +1405,6 @@ static bool ask_tracks(GPtrArray *selected, char ***skip_audio, char ***skip_sub
     return ok;
 }
 
-/* ---------------------------------------------------------------------------
- * Seite Suche
- * ------------------------------------------------------------------------- */
-static void search_job_free(SearchJob *job)
-{
-    g_free(job->text);
-    g_free(job->dir);
-    g_free(job->error);
-    if (job->items) g_ptr_array_free(job->items, TRUE);
-    g_free(job);
-}
-
-/* Ergebnis im Hauptthread übernehmen */
-static gboolean on_search_done(gpointer data)
-{
-    SearchJob *job = data;
-    if (job != ui.search_job) {                     /* von einer neueren Suche überholt */
-        search_job_free(job);
-        return G_SOURCE_REMOVE;
-    }
-    ui.search_job = NULL;
-    gtk_spinner_stop(GTK_SPINNER(ui.search_spinner));
-    gtk_widget_hide(ui.search_spinner);
-    gtk_button_set_label(GTK_BUTTON(ui.search_button), "Suchen");
-    if (job->error) {
-        show_info_bar(GTK_MESSAGE_ERROR, job->error);
-        set_label_text(ui.search_note, "");
-    } else if (job->items) {
-        ui.has_searched = true;
-        guint count = job->items->len;
-        GPtrArray *items = job->items;
-        job->items = NULL;
-        build_groups(items);
-        g_ptr_array_set_free_func(items, NULL);     /* gehören jetzt den Staffeln */
-        g_ptr_array_free(items, TRUE);
-        char *note = g_strdup_printf("%u %s%s", count, plural((int)count, "Treffer", "Treffer"),
-                                     job->truncated ? " – Liste gekürzt, bitte genauer suchen"
-                                                    : "");
-        set_label_text(ui.search_note, note);
-        g_free(note);
-        rebuild_results();
-    }
-    search_job_free(job);
-    return G_SOURCE_REMOVE;
-}
-
-/* Titel als Items an items hängen; der Stand braucht Plattenzugriffe, darum im Hintergrund.
- * Übernimmt die Titel. */
-static void add_items(GPtrArray *items, GPtrArray *titles, const char *dir)
-{
-    for (guint i = 0; i < titles->len; i++) {
-        Item *item = g_new0(Item, 1);
-        item->title = titles->pdata[i];
-        item->status = md_title_status(item->title, dir, &item->path);
-        g_ptr_array_add(items, item);
-    }
-    g_ptr_array_set_free_func(titles, NULL);
-    g_ptr_array_free(titles, TRUE);
-}
-
-/* Suche im Hintergrund */
-static gpointer search_thread(gpointer data)
-{
-    SearchJob *job = data;
-    GPtrArray *titles = md_search(&job->query, &job->cancel, &job->truncated, &job->error);
-    if (titles) {
-        job->items = g_ptr_array_new_with_free_func(item_free);
-        add_items(job->items, titles, job->dir);
-    }
-    g_idle_add(on_search_done, job);
-    return NULL;
-}
-
-static void start_search(void)
-{
-    if (ui.search_job) {                            /* zweiter Klick: abbrechen */
-        g_atomic_int_set(&ui.search_job->cancel, 1);
-        ui.search_job = NULL;
-        gtk_spinner_stop(GTK_SPINNER(ui.search_spinner));
-        gtk_widget_hide(ui.search_spinner);
-        gtk_button_set_label(GTK_BUTTON(ui.search_button), "Suchen");
-        return;
-    }
-    SearchJob *job = g_new0(SearchJob, 1);
-    job->text = g_strdup(gtk_entry_get_text(GTK_ENTRY(ui.search_entry)));
-    g_strstrip(job->text);
-    job->dir = g_strdup(ui.cfg.dir);
-    job->query.text = job->text;
-    job->query.kind = (MdKind)gtk_combo_box_get_active(GTK_COMBO_BOX(ui.kind_combo));
-    job->query.sources = ui.cfg.sources;
-    job->query.min_minutes = ui.cfg.min_minutes;
-    job->query.hide_variants = !ui.cfg.show_signed;
-    ui.search_job = job;
-    show_info_bar(GTK_MESSAGE_INFO, NULL);
-    gtk_widget_show(ui.search_spinner);
-    gtk_spinner_start(GTK_SPINNER(ui.search_spinner));
-    gtk_button_set_label(GTK_BUTTON(ui.search_button), "Abbrechen");
-    set_label_text(ui.search_note, "");
-    g_thread_unref(g_thread_new("suche", search_thread, job));
-}
-
-static void on_search_clicked(GtkWidget *w, gpointer d)
-{
-    (void)w;
-    (void)d;
-    start_search();
-}
-
-static void on_filter_changed(GtkComboBox *c, gpointer d)
-{
-    (void)c;
-    (void)d;
-    /* Unsichtbares darf nicht heimlich mitgeladen werden */
-    GPtrArray *selected = collect_search_selected();
-    for (guint i = 0; i < selected->len; i++) {
-        Item *item = selected->pdata[i];
-        if (!item_visible(item)) item->selected = false;
-    }
-    g_ptr_array_free(selected, TRUE);
-    ui.search_tree.limit = RESULT_ROWS_BATCH;
-    rebuild_results();
-}
-
-/* "Alle fehlenden auswählen": was noch nicht da ist, in einem Schritt */
-static void on_select_missing_clicked(GtkButton *b, gpointer d)
-{
-    (void)b;
-    (void)d;
-    GPtrArray *selected = collect_search_selected();
-    bool any = selected->len > 0;
-    g_ptr_array_free(selected, TRUE);
-    for (guint g = 0; ui.search_tree.groups && g < ui.search_tree.groups->len; g++)
-        group_select(ui.search_tree.groups->pdata[g], !any);
-    update_checks();
-}
-
 /* Auswahl in die Warteschlange stellen */
 static void on_download_clicked(GtkButton *b, gpointer d)
 {
@@ -1592,10 +1465,6 @@ static void on_source_toggled(GtkToggleButton *b, gpointer d)
     ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
     ui.genres_dirty = true;
     rebuild_preview();
-    if (ui.has_searched) {
-        if (ui.search_job) start_search();          /* laufende Suche abbrechen */
-        start_search();
-    }
 }
 
 /* Zeile "Mediathek: ZDF ARD 3sat Alle" */
@@ -1642,68 +1511,34 @@ static GtkWidget *build_footer(int index)
     return footer;
 }
 
-static GtkWidget *build_search_page(void)
-{
-    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-
-    GtkWidget *top = new_column();
-    gtk_widget_set_margin_top(top, 14);
-    gtk_widget_set_margin_bottom(top, 8);
-    GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    ui.search_entry = gtk_search_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(ui.search_entry), "Film oder Serie suchen …");
-    gtk_widget_set_hexpand(ui.search_entry, TRUE);
-    g_signal_connect(ui.search_entry, "activate", G_CALLBACK(on_search_clicked), NULL);
-    gtk_box_pack_start(GTK_BOX(bar), ui.search_entry, TRUE, TRUE, 0);
-    ui.kind_combo = new_combo(KIND_TEXT, 3, MD_KIND_ALL);
-    gtk_box_pack_start(GTK_BOX(bar), ui.kind_combo, FALSE, FALSE, 0);
-    ui.search_spinner = gtk_spinner_new();
-    gtk_box_pack_start(GTK_BOX(bar), ui.search_spinner, FALSE, FALSE, 0);
-    ui.search_button = gtk_button_new_with_label("Suchen");
-    add_css_class(ui.search_button, "suggested-action");
-    g_signal_connect(ui.search_button, "clicked", G_CALLBACK(on_search_clicked), NULL);
-    gtk_box_pack_start(GTK_BOX(bar), ui.search_button, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(top), bar, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(top), build_source_bar(FOOTER_SEARCH), FALSE, FALSE, 0);
-
-    GtkWidget *line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    ui.search_note = new_label("", "zd-sub");
-    add_css_class(ui.search_note, "dim-label");
-    gtk_box_pack_start(GTK_BOX(line), ui.search_note, TRUE, TRUE, 0);
-    ui.filter_combo = new_combo(FILTER_TEXT, 3, FILTER_ALL);
-    gtk_widget_set_tooltip_text(ui.filter_combo, "Zeigt, was schon geladen ist und was noch fehlt");
-    g_signal_connect(ui.filter_combo, "changed", G_CALLBACK(on_filter_changed), NULL);
-    gtk_box_pack_end(GTK_BOX(line), ui.filter_combo, FALSE, FALSE, 0);
-    ui.select_missing_button = gtk_button_new_with_label("Alle fehlenden an/aus");
-    g_signal_connect(ui.select_missing_button, "clicked", G_CALLBACK(on_select_missing_clicked),
-                     NULL);
-    gtk_box_pack_end(GTK_BOX(line), ui.select_missing_button, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(top), line, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(page), top, FALSE, FALSE, 0);
-
-    GtkWidget *scrolled, *column = new_page_column(&scrolled);
-    gtk_widget_set_margin_top(column, 4);
-    ui.search_tree.list = add_group(column, NULL);
-    g_signal_connect(ui.search_tree.list, "row-activated", G_CALLBACK(on_result_row_activated),
-                     &ui.search_tree);
-    gtk_box_pack_start(GTK_BOX(page), scrolled, TRUE, TRUE, 0);
-
-    gtk_box_pack_start(GTK_BOX(page), build_footer(FOOTER_SEARCH), FALSE, FALSE, 0);
-    return page;
-}
-
 /* ---------------------------------------------------------------------------
  * Seite Vorschau
  * ---------------------------------------------------------------------------
  * Die Startliste nennt nur die neuesten Folgen einer Serie. Alle Folgen werden erst geholt,
  * wenn eine Serie angehakt oder geöffnet wird (Group.complete). Die Häkchen landen in denselben
- * Items wie auf der Seite Suche, die Auswahl gilt also seitenübergreifend.
+ * Items wie in der Detailansicht, die Auswahl gilt also für beide.
  * ------------------------------------------------------------------------- */
 /* Bild in die Kachel setzen */
 static void set_tile_cover(const Group *group)
 {
     if (group->tile_image && group->cover)
         gtk_image_set_from_pixbuf(GTK_IMAGE(group->tile_image), group->cover);
+}
+
+/* Kategorien von IMDb zu denen der Mediathek legen */
+static void merge_imdb_genres(Group *group)
+{
+    if (!group->genres || !group->imdb_genres) return;
+    GStrvBuilder *all = g_strv_builder_new();
+    g_strv_builder_addv(all, (const char **)group->genres);
+    for (char **g = group->imdb_genres; *g; g++)
+        if (!g_strv_contains((const char *const *)group->genres, *g))
+            g_strv_builder_add(all, *g);
+    g_strfreev(group->genres);
+    group->genres = g_strv_builder_end(all);
+    g_strv_builder_unref(all);
+    g_clear_pointer(&group->imdb_genres, g_strfreev);
+    ui.genres_dirty = true;
 }
 
 /* Bild im Hintergrund laden und verkleinern */
@@ -1722,11 +1557,14 @@ static gboolean on_cover_done(gpointer data)
         group->fsk = g_steal_pointer(&job->info->fsk);
         ui.genres_dirty = true;
     }
+    if (group && !job->info && !group->genres) group->genres = g_new0(char *, 1);
+    if (group) merge_imdb_genres(group);
     if (job->background && --ui.genre_pending == 0) ui.genres_dirty = true;
     md_page_info_free(job->info);
     g_clear_object(&job->pixbuf);
     g_free(job->key);
     g_free(job->website);
+    g_free(job->video);
     g_free(job->path);
     g_free(job);
     return G_SOURCE_REMOVE;
@@ -1737,11 +1575,37 @@ static void cover_worker(gpointer data, gpointer d)
     (void)d;
     CoverJob *job = data;
     job->info = md_page_info(job->website);
-    if (!job->background) job->path = md_cover_file(job->website);
+    if (!job->background) job->path = md_cover_file(job->website, job->video);
     if (job->path)
         job->pixbuf = gdk_pixbuf_new_from_file_at_scale(job->path, COVER_WIDTH, COVER_HEIGHT,
                                                         FALSE, NULL);
     g_idle_add(on_cover_done, job);
+}
+
+static gboolean on_imdb_genres_done(gpointer data)
+{
+    GenreJob *job = data;
+    Group *group = ui.preview_index ? g_hash_table_lookup(ui.preview_index, job->key) : NULL;
+    if (group && !group->website && !group->genres) group->genres = g_new0(char *, 1);
+    if (group && job->genres) {
+        g_strfreev(group->imdb_genres);
+        group->imdb_genres = g_steal_pointer(&job->genres);
+        merge_imdb_genres(group);
+    }
+    if (--ui.genre_pending == 0) ui.genres_dirty = true;
+    g_strfreev(job->genres);
+    g_free(job->key);
+    g_free(job->name);
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static void imdb_genres_worker(gpointer data, gpointer d)
+{
+    (void)d;
+    GenreJob *job = data;
+    job->genres = md_imdb_genres(job->name, job->is_film);
+    g_idle_add(on_imdb_genres_done, job);
 }
 
 static void request_cover(Group *group)
@@ -1751,6 +1615,7 @@ static void request_cover(Group *group)
     CoverJob *job = g_new0(CoverJob, 1);
     job->key = g_strdup(group->key);
     job->website = g_strdup(group->website);
+    job->video = g_strdup(group->video);
     g_thread_pool_push(ui.cover_pool, job, NULL);
 }
 
@@ -1766,6 +1631,12 @@ static void request_all_genres(void)
 {
     for (guint i = 0; i < ui.preview->len; i++) {
         const Group *group = ui.preview->pdata[i];
+        GenreJob *imdb = g_new0(GenreJob, 1);
+        imdb->key = g_strdup(group->key);
+        imdb->name = g_strdup(group->name);
+        imdb->is_film = group->is_film;
+        ui.genre_pending++;
+        g_thread_pool_push(ui.imdb_pool, imdb, NULL);
         if (group->genres || !group->website) continue;
         CoverJob *job = g_new0(CoverJob, 1);
         job->key = g_strdup(group->key);
@@ -1791,7 +1662,11 @@ static char *group_meta(const Group *group, bool short_form)
             seconds += ((Item *)season->items->pdata[n])->title->duration;
     }
     GString *s = g_string_new(NULL);
-    if (!short_form) g_string_append_printf(s, "%s · ", md_source_label(group->source));
+    if (!short_form) {
+        for (int i = 0; i < SOURCE_COUNT; i++)
+            if (group->source & SOURCE_BITS[i])
+                g_string_append_printf(s, "%s · ", md_source_label(SOURCE_BITS[i]));
+    }
     if (group->fsk) g_string_append_printf(s, "%s · ", group->fsk);
     char *date = format_date(group->newest);
     if (group->is_film) {
@@ -1932,8 +1807,6 @@ static gboolean on_series_done(gpointer data)
     if (group) {
         group->loading = false;
         if (job->items) {
-            for (guint i = 0; i < job->items->len; i++)
-                ((Item *)job->items->pdata[i])->in_preview = true;
             GPtrArray *found = group_items(job->items);
             g_ptr_array_set_free_func(job->items, NULL);    /* gehören jetzt den Staffeln */
             for (guint i = 0; i < found->len; i++) {
@@ -2217,14 +2090,16 @@ static void add_tile(GtkWidget *box, Group *group)
                                 : "Alle fehlenden Folgen auswählen");
     g_signal_connect(group->tile_check, "toggled", G_CALLBACK(on_tile_toggled), group);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), group->tile_check);
-    GtkWidget *source_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    GtkWidget *source_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 3);
     add_css_class(source_box, "zd-tile-badges");
     gtk_widget_set_halign(source_box, GTK_ALIGN_END);
     gtk_widget_set_valign(source_box, GTK_ALIGN_START);
     gtk_widget_set_margin_end(source_box, 6);
     gtk_widget_set_margin_top(source_box, 6);
-    gtk_box_pack_start(GTK_BOX(source_box), new_badge(md_source_label(group->source), NULL),
-                       FALSE, FALSE, 0);
+    for (int i = 0; i < SOURCE_COUNT; i++)
+        if (group->source & SOURCE_BITS[i])
+            gtk_box_pack_start(GTK_BOX(source_box),
+                               new_badge(md_source_label(SOURCE_BITS[i]), NULL), FALSE, FALSE, 0);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), source_box);
     group->tile_badges = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     add_css_class(group->tile_badges, "zd-tile-badges");
@@ -2263,6 +2138,28 @@ static void add_tile(GtkWidget *box, Group *group)
     request_cover(group);
 }
 
+/* Gibt es eine Tonspur in dieser Sprache? */
+static bool group_has_language(const Group *group, const char *language)
+{
+    for (guint s = 0; s < group->seasons->len; s++) {
+        const Season *season = group->seasons->pdata[s];
+        for (guint i = 0; i < season->items->len; i++) {
+            const GPtrArray *audio = ((const Item *)season->items->pdata[i])->title->audio;
+            for (guint a = 0; a < audio->len; a++)
+                if (!strcmp(((const MdTrack *)audio->pdata[a])->label, language)) return true;
+        }
+    }
+    return false;
+}
+
+/* Kategorie der Kachel? Noch unbekannte Kategorien zählen nirgends. */
+static bool group_has_genre(const Group *group, const char *genre)
+{
+    if (!group->genres) return false;
+    if (!strcmp(genre, NO_GENRE)) return !*group->genres;
+    return g_strv_contains((const char *const *)group->genres, genre);
+}
+
 /* Passt eine Kachel zu den Filtern oben? filter ist kleingeschrieben. */
 static bool tile_matches(const Group *group, const char *filter)
 {
@@ -2275,9 +2172,12 @@ static bool tile_matches(const Group *group, const char *filter)
     if (!(group->source & ui.cfg.sources)) return false;
     if (kind == MD_KIND_FILMS && !group->is_film) return false;
     if (kind == MD_KIND_SERIES && group->is_film) return false;
-    if (ui.active_genre && !(group->genres && g_strv_contains((const char *const *)group->genres,
-                                                              ui.active_genre)))
-        return false;
+    if (ui.active_genre && !group_has_genre(group, ui.active_genre)) return false;
+    char *language = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(ui.preview_language));
+    bool speaks = !language || !strcmp(language, ALL_LANGUAGES) ||
+                  group_has_language(group, language);
+    g_free(language);
+    if (!speaks) return false;
     char *lower = g_utf8_strdown(group->name, -1);
     bool match = strstr(lower, filter) != NULL;
     g_free(lower);
@@ -2334,7 +2234,8 @@ static GHashTable *count_genres(void)
     for (guint i = 0; ui.preview && i < ui.preview->len; i++) {
         const Group *group = ui.preview->pdata[i];
         if (!(group->source & ui.cfg.sources)) continue;
-        for (char **g = group->genres; g && *g; g++) {
+        char *none[] = {NO_GENRE, NULL};
+        for (char **g = group->genres && !*group->genres ? none : group->genres; g && *g; g++) {
             int count = GPOINTER_TO_INT(g_hash_table_lookup(counts, *g));
             g_hash_table_insert(counts, *g, GINT_TO_POINTER(count + 1));
         }
@@ -2413,7 +2314,7 @@ static void update_genre_chips(void)
     sync_genre_chips();
     if (!ui.preview_busy) {
         char *note = ui.genre_pending
-                     ? g_strdup_printf("Kategorien werden ermittelt, noch %d Titel …",
+                     ? g_strdup_printf("Kategorien werden ermittelt, noch %d Abfragen …",
                                        ui.genre_pending)
                      : g_strdup("");
         set_label_text(ui.preview_note, note);
@@ -2437,6 +2338,36 @@ static void on_preview_filter_changed(GtkWidget *w, gpointer d)
     (void)d;
     ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
     rebuild_preview();
+}
+
+/* Sprachen der geladenen Titel zur Auswahl stellen; die gewählte bleibt, wenn es sie noch gibt */
+static void update_language_choices(void)
+{
+    GtkComboBoxText *combo = GTK_COMBO_BOX_TEXT(ui.preview_language);
+    char *active = gtk_combo_box_text_get_active_text(combo);
+    GHashTable *found = g_hash_table_new(g_str_hash, g_str_equal);
+    for (guint g = 0; g < ui.preview->len; g++) {
+        const Group *group = ui.preview->pdata[g];
+        for (guint s = 0; s < group->seasons->len; s++) {
+            const Season *season = group->seasons->pdata[s];
+            for (guint i = 0; i < season->items->len; i++) {
+                const GPtrArray *audio = ((const Item *)season->items->pdata[i])->title->audio;
+                for (guint a = 0; a < audio->len; a++)
+                    g_hash_table_add(found, ((MdTrack *)audio->pdata[a])->label);
+            }
+        }
+    }
+    GList *names = g_list_sort(g_hash_table_get_keys(found), (GCompareFunc)g_utf8_collate);
+    g_signal_handlers_block_by_func(combo, on_preview_filter_changed, NULL);
+    gtk_combo_box_text_remove_all(combo);
+    gtk_combo_box_text_append(combo, ALL_LANGUAGES, ALL_LANGUAGES);
+    for (GList *l = names; l; l = l->next) gtk_combo_box_text_append(combo, l->data, l->data);
+    if (!active || !gtk_combo_box_set_active_id(GTK_COMBO_BOX(combo), active))
+        gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
+    g_signal_handlers_unblock_by_func(combo, on_preview_filter_changed, NULL);
+    g_list_free(names);
+    g_hash_table_destroy(found);
+    g_free(active);
 }
 
 static void on_more_films_clicked(GtkButton *b, gpointer d)
@@ -2471,11 +2402,10 @@ static gboolean on_preview_done(gpointer data)
     gtk_widget_hide(ui.preview_spinner);
     if (job->items) {
         close_hover();
-        for (guint i = 0; i < job->items->len; i++)
-            ((Item *)job->items->pdata[i])->in_preview = true;
         if (ui.preview_index) g_hash_table_destroy(ui.preview_index);
         if (ui.preview) g_ptr_array_free(ui.preview, TRUE);
         ui.preview = group_items(job->items);
+        update_language_choices();
         g_ptr_array_set_free_func(job->items, NULL);        /* gehören jetzt den Staffeln */
         g_ptr_array_sort(ui.preview, compare_newest);
         ui.preview_index = g_hash_table_new(g_str_hash, g_str_equal);
@@ -2593,6 +2523,13 @@ static GtkWidget *build_preview_page(void)
     ui.preview_filter = new_combo(FILTER_TEXT, 3, FILTER_ALL);
     g_signal_connect(ui.preview_filter, "changed", G_CALLBACK(on_preview_filter_changed), NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.preview_filter, FALSE, FALSE, 0);
+    ui.preview_language = gtk_combo_box_text_new();
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(ui.preview_language), ALL_LANGUAGES,
+                              ALL_LANGUAGES);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.preview_language), 0);
+    gtk_widget_set_tooltip_text(ui.preview_language, "Zeigt nur Titel mit dieser Tonspur");
+    g_signal_connect(ui.preview_language, "changed", G_CALLBACK(on_preview_filter_changed), NULL);
+    gtk_box_pack_start(GTK_BOX(bar), ui.preview_language, FALSE, FALSE, 0);
     ui.preview_spinner = gtk_spinner_new();
     gtk_box_pack_start(GTK_BOX(bar), ui.preview_spinner, FALSE, FALSE, 0);
     GtkWidget *refresh = new_icon_button("view-refresh-symbolic", "Vorschau neu laden");
@@ -2956,7 +2893,7 @@ static GtkWidget *build_downloads_page(void)
     g_signal_connect(ui.limit_spin, "value-changed", G_CALLBACK(on_limit_changed), NULL);
 
     ui.jobs_list = add_group(page, "Aufträge");
-    ui.jobs_empty = new_label("Noch nichts in der Warteschlange. Auf der Seite Suche auswählen "
+    ui.jobs_empty = new_label("Noch nichts in der Warteschlange. In der Vorschau auswählen "
                               "und „Herunterladen“ klicken.", "dim-label");
     gtk_widget_set_no_show_all(ui.jobs_empty, TRUE);
     set_wrapping(ui.jobs_empty, 70);
@@ -2978,16 +2915,14 @@ static void on_forget_clicked(GtkButton *b, gpointer d)
     rebuild_library();
 }
 
-/* "Fehlende Folgen": Serie auf der Seite Suche öffnen, gefiltert auf das, was fehlt */
+/* "Fehlende Folgen": Serie in der Vorschau zeigen, gefiltert auf das, was fehlt */
 static void on_find_missing_clicked(GtkButton *b, gpointer d)
 {
     (void)d;
-    gtk_entry_set_text(GTK_ENTRY(ui.search_entry), g_object_get_data(G_OBJECT(b), "path"));
-    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.kind_combo), MD_KIND_ALL);
-    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.filter_combo), FILTER_MISSING);
-    gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "suche");
-    if (ui.search_job) start_search();              /* laufende Suche abbrechen */
-    start_search();
+    gtk_entry_set_text(GTK_ENTRY(ui.preview_search), g_object_get_data(G_OBJECT(b), "path"));
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.preview_kind), MD_KIND_ALL);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.preview_filter), FILTER_MISSING);
+    gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "vorschau");
 }
 
 static void on_library_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer d)
@@ -3308,7 +3243,7 @@ static GtkWidget *build_settings_page(void)
     convert_spin = new_setting_spin(1, MD_MAX_CONVERSIONS, c->conversions);
     add_row(queue, "Gleichzeitige Umwandlungen", NULL, NULL, convert_spin, NULL);
 
-    GtkWidget *search = add_group(page, "Suche");
+    GtkWidget *search = add_group(page, "Anzeige");
     min_spin = new_setting_spin(0, 300, c->min_minutes);
     add_row(search, "Mindestlänge in Minuten", "Blendet Trailer und kurze Clips aus.", NULL,
             min_spin, NULL);
@@ -3577,7 +3512,6 @@ static void on_activate(GtkApplication *app, gpointer d)
     gtk_stack_set_transition_type(GTK_STACK(ui.stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_set_transition_duration(GTK_STACK(ui.stack), 180);
     gtk_stack_add_titled(GTK_STACK(ui.stack), build_preview_page(), "vorschau", "Vorschau");
-    gtk_stack_add_titled(GTK_STACK(ui.stack), build_search_page(), "suche", "Suche");
     ui.downloads_page = build_downloads_page();
     gtk_stack_add_titled(GTK_STACK(ui.stack), ui.downloads_page, "downloads", "Downloads");
     gtk_stack_add_titled(GTK_STACK(ui.stack), build_library_page(), "bibliothek", "Bibliothek");
@@ -3595,8 +3529,6 @@ static void on_activate(GtkApplication *app, gpointer d)
     g_signal_connect(ui.win, "size-allocate", G_CALLBACK(on_window_size_allocate), NULL);
     gtk_widget_show_all(ui.win);
     gtk_widget_hide(ui.infobar);
-    gtk_widget_hide(ui.search_spinner);
-    gtk_widget_set_no_show_all(ui.search_spinner, TRUE);
     gtk_widget_hide(ui.preview_spinner);
     gtk_widget_set_no_show_all(ui.preview_spinner, TRUE);
     update_dir_label();
@@ -3606,6 +3538,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     show_start_notes();
     g_timeout_add(TICK_MS, on_tick, NULL);
     ui.cover_pool = g_thread_pool_new(cover_worker, NULL, COVER_THREADS, FALSE, NULL);
+    ui.imdb_pool = g_thread_pool_new(imdb_genres_worker, NULL, IMDB_THREADS, FALSE, NULL);
     g_thread_pool_set_sort_function(ui.cover_pool, compare_cover_jobs, NULL);
     ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
     rebuild_preview();

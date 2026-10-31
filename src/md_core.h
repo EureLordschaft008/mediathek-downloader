@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "1.3.0"
+#define MD_VERSION "1.4.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -144,7 +144,7 @@ gint64 md_title_estimate(const MdTitle *title, MdQuality quality);  /* Bytes, ge
 char *md_target_path(const MdTitle *title, const char *dir);        /* Pfad der MP4-Datei */
 
 /* Titelbild der Seite website als Datei holen (blockiert); NULL = keines. Freigeben mit g_free. */
-char *md_cover_file(const char *website);
+char *md_cover_file(const char *website, const char *video);
 /* Altersfreigabe und Kategorien von der Seite des Titels (blockiert); NULL = nicht erreichbar */
 MdPageInfo *md_page_info(const char *website);
 void md_page_info_free(MdPageInfo *info);
@@ -153,6 +153,9 @@ char *md_default_cover_dir(void);           /* ~/.mediathek-downloader/bilder */
 
 /* Adresse der passenden IMDb-Seite, sonst der IMDb-Suche (blockiert). Freigeben mit g_free. */
 char *md_imdb_url(const char *name, bool is_film);
+/* Kategorien von IMDb auf Deutsch (blockiert, lädt anfangs etwa 230 MB). NULL = kein sicherer
+ * Treffer. Freigeben mit g_strfreev(). */
+char **md_imdb_genres(const char *name, bool is_film);
 /* Bewertung nachschlagen (blockiert, lädt beim ersten Mal die Datendatei von IMDb);
  * false = kein sicherer Treffer */
 bool md_imdb_info(const char *name, bool is_film, MdImdbInfo *info);
