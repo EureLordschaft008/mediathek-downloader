@@ -6,9 +6,9 @@ Architecture: @ARCH@
 Installed-Size: @SIZE@
 Depends: curl, ffmpeg, libgtk-3-0t64 | libgtk-3-0
 Maintainer: EureLordschaft008 <49617891+EureLordschaft008@users.noreply.github.com>
-Description: Filme und Serien aus der ZDF-Mediathek laden
+Description: Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat laden
  Zeigt neue Filme und Serien als Vorschau mit Bildern, sucht in der
- ZDF-Mediathek, zeigt, was schon geladen ist, und lädt einzelne
+ Mediatheken von ZDF, ARD und 3sat, zeigt, was schon geladen ist, und lädt einzelne
  Folgen, ganze Staffeln oder Serien mit allen Sprachen und Untertiteln. Downloads
  lassen sich pausieren und im Tempo begrenzen. Auf Wunsch werden die Videos nach
  AV1 umgewandelt.

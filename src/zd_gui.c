@@ -48,7 +48,9 @@
 #define FOOTER_SEARCH 0
 #define FOOTER_PREVIEW 1
 #define FOOTER_COUNT 2
+#define SOURCE_COUNT 3
 
+static const int SOURCE_BITS[SOURCE_COUNT] = {ZD_SOURCE_ZDF, ZD_SOURCE_ARD, ZD_SOURCE_3SAT};
 static const char *const KIND_TEXT[3] = {"Alles", "Filme", "Serien"};
 static const char *const FILTER_TEXT[3] = {"Alle anzeigen", "Nur fehlende", "Nur geladene"};
 static const char *const QUALITY_TEXT[3] = {"Hoch – 1080p (ca. 4,5 GB je 90 min)",
@@ -82,6 +84,7 @@ typedef struct {
     bool is_film;
     GPtrArray *seasons;         /* Season* */
     bool expanded;
+    int source;                 /* ZD_SOURCE_* */
     /* nur Vorschau */
     char *key, *website, *description, *cover_path;
     gint64 newest;
@@ -132,7 +135,7 @@ typedef struct {
 /* alle Folgen einer Serie im Hintergrund */
 typedef struct {
     char *key, *topic, *dir, *error;
-    int min_minutes;
+    int min_minutes, source;
     bool hide_variants;
     ZdCache cache;
     GPtrArray *items;           /* Item* */
@@ -166,6 +169,7 @@ typedef struct {
     int quality, encoder, gpu_quality, cpu_rf;
     int parallel, conversions, min_minutes;
     double limit_mb;
+    int sources;                /* gewählte Mediatheken */
     bool limit_on, convert, keep_original, show_signed;
     int width, height;
     bool maximized;
@@ -186,6 +190,7 @@ typedef struct {
     GtkWidget *search_note, *select_missing_button;
     GtkWidget *selection_labels[FOOTER_COUNT], *target_labels[FOOTER_COUNT];
     GtkWidget *download_buttons[FOOTER_COUNT];
+    GtkWidget *source_buttons[FOOTER_COUNT][SOURCE_COUNT + 1];  /* zuletzt "Alle" */
     SearchJob *search_job;
     ResultTree search_tree;
     bool updating_checks, has_searched;
@@ -641,6 +646,7 @@ static void settings_load(void)
     c->min_minutes = settings_int(file, "Mindestlaenge", 10, 0, 300);
     c->limit_mb = CLAMP(settings_int(file, "LimitMBs", 10, 1, 1000), 1, 1000);
     c->limit_on = settings_bool(file, "LimitAktiv", false);
+    c->sources = settings_int(file, "Mediatheken", ZD_SOURCE_ALL, 1, ZD_SOURCE_ALL);
     c->convert = settings_bool(file, "AV1", false);
     c->keep_original = settings_bool(file, "OriginalBehalten", false);
     c->show_signed = settings_bool(file, "Gebaerdensprache", false);
@@ -666,6 +672,7 @@ static void settings_save(void)
     g_key_file_set_integer(file, SETTINGS_GROUP, "Mindestlaenge", c->min_minutes);
     g_key_file_set_integer(file, SETTINGS_GROUP, "LimitMBs", (int)c->limit_mb);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "LimitAktiv", c->limit_on);
+    g_key_file_set_integer(file, SETTINGS_GROUP, "Mediatheken", c->sources);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "AV1", c->convert);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "OriginalBehalten", c->keep_original);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "Gebaerdensprache", c->show_signed);
@@ -817,7 +824,7 @@ static GPtrArray *group_items(GPtrArray *items)
         Item *item = items->pdata[i];
         const ZdTitle *t = item->title;
         const char *name = t->is_film ? t->name : t->topic;
-        char *key = g_strconcat(t->is_film ? "F:" : "S:", name, NULL);
+        char *key = g_strdup_printf("%d:%c:%s", t->source, t->is_film ? 'F' : 'S', name);
         Group *group = g_hash_table_lookup(by_name, key);
         if (!group) {
             group = g_new0(Group, 1);
@@ -825,6 +832,7 @@ static GPtrArray *group_items(GPtrArray *items)
             group->is_film = t->is_film;
             group->seasons = g_ptr_array_new_with_free_func(season_free);
             group->key = g_strdup(key);
+            group->source = t->source;
             g_ptr_array_add(groups, group);
             g_hash_table_insert(by_name, g_strdup(key), group);
         }
@@ -1000,7 +1008,8 @@ static char *item_subtitle(const ZdTitle *t)
 {
     char *date = format_date(t->timestamp);
     char *size = zd_format_size((double)zd_title_estimate(t, ui.cfg.quality));
-    GString *s = g_string_new(NULL);
+    GString *s = g_string_new(zd_source_label(t->source));
+    g_string_append(s, " · ");
     if (t->season >= 0) g_string_append_printf(s, "S%02dE%02d · ", t->season, t->episode);
     g_string_append_printf(s, "%d min · %s · ca. %s", t->duration / 60, date, size);
     if (t->audio->len > 1 || t->subtitles->len) {
@@ -1469,6 +1478,7 @@ static void start_search(void)
     job->dir = g_strdup(ui.cfg.dir);
     job->query.text = job->text;
     job->query.kind = (ZdKind)gtk_combo_box_get_active(GTK_COMBO_BOX(ui.kind_combo));
+    job->query.sources = ui.cfg.sources;
     job->query.min_minutes = ui.cfg.min_minutes;
     job->query.hide_variants = !ui.cfg.show_signed;
     ui.search_job = job;
@@ -1545,6 +1555,62 @@ static void on_download_clicked(GtkButton *b, gpointer d)
     gtk_stack_set_visible_child(GTK_STACK(ui.stack), ui.downloads_page);
 }
 
+/* Knöpfe beider Seiten zum gewählten Stand bringen */
+static void sync_source_buttons(void)
+{
+    ui.updating_chips = true;
+    for (int page = 0; page < FOOTER_COUNT; page++) {
+        for (int i = 0; i < SOURCE_COUNT; i++)
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.source_buttons[page][i]),
+                                         ui.cfg.sources != ZD_SOURCE_ALL &&
+                                         (ui.cfg.sources & SOURCE_BITS[i]));
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.source_buttons[page][SOURCE_COUNT]),
+                                     ui.cfg.sources == ZD_SOURCE_ALL);
+    }
+    ui.updating_chips = false;
+}
+
+/* Mediathek angeklickt. Aus "Alle" heraus gilt der Klick nur dieser einen, danach kommen weitere
+ * dazu oder gehen wieder weg; ganz ohne Mediathek bleibt die zuletzt gewählte. */
+static void on_source_toggled(GtkToggleButton *b, gpointer d)
+{
+    (void)b;
+    if (ui.updating_chips) return;
+    int bit = GPOINTER_TO_INT(d);
+    if (bit == ZD_SOURCE_ALL) ui.cfg.sources = ZD_SOURCE_ALL;
+    else if (ui.cfg.sources == ZD_SOURCE_ALL) ui.cfg.sources = bit;
+    else if (ui.cfg.sources != bit) ui.cfg.sources ^= bit;
+    sync_source_buttons();
+    settings_save();
+    ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
+    ui.genres_dirty = true;
+    rebuild_preview();
+    if (ui.has_searched) {
+        if (ui.search_job) start_search();          /* laufende Suche abbrechen */
+        start_search();
+    }
+}
+
+/* Zeile "Mediathek: ZDF ARD 3sat Alle" */
+static GtkWidget *build_source_bar(int page)
+{
+    GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_margin_top(bar, 6);
+    GtkWidget *label = new_label("Mediathek", "dim-label");
+    gtk_widget_set_margin_end(label, 6);
+    gtk_box_pack_start(GTK_BOX(bar), label, FALSE, FALSE, 0);
+    for (int i = 0; i <= SOURCE_COUNT; i++) {
+        int bit = i < SOURCE_COUNT ? SOURCE_BITS[i] : ZD_SOURCE_ALL;
+        GtkWidget *b = gtk_toggle_button_new_with_label(i < SOURCE_COUNT ? zd_source_label(bit)
+                                                                         : "Alle");
+        add_css_class(b, "zd-chip");
+        g_signal_connect(b, "toggled", G_CALLBACK(on_source_toggled), GINT_TO_POINTER(bit));
+        gtk_box_pack_start(GTK_BOX(bar), b, FALSE, FALSE, 0);
+        ui.source_buttons[page][i] = b;
+    }
+    return bar;
+}
+
 /* Fußzeile mit Auswahl, Ziel und Knopf "Herunterladen" */
 static GtkWidget *build_footer(int index)
 {
@@ -1591,6 +1657,7 @@ static GtkWidget *build_search_page(void)
     g_signal_connect(ui.search_button, "clicked", G_CALLBACK(on_search_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.search_button, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(top), bar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(top), build_source_bar(FOOTER_SEARCH), FALSE, FALSE, 0);
 
     GtkWidget *line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     ui.search_note = new_label("", "zd-sub");
@@ -1716,9 +1783,10 @@ static char *group_meta(const Group *group, bool short_form)
         for (guint n = 0; n < season->items->len; n++)
             seconds += ((Item *)season->items->pdata[n])->title->duration;
     }
-    GString *s = g_string_new(group->fsk ? group->fsk : "");
+    GString *s = g_string_new(NULL);
+    if (!short_form) g_string_append_printf(s, "%s · ", zd_source_label(group->source));
+    if (group->fsk) g_string_append_printf(s, "%s · ", group->fsk);
     char *date = format_date(group->newest);
-    if (s->len) g_string_append(s, " · ");
     if (group->is_film) {
         g_string_append_printf(s, "%d min · %s", seconds / MAX(c.total, 1) / 60, date);
     } else if (group->complete && short_form) {
@@ -1893,7 +1961,8 @@ static gboolean on_series_done(gpointer data)
 static gpointer series_thread(gpointer data)
 {
     SeriesJob *job = data;
-    ZdQuery query = {.text = job->topic, .kind = ZD_KIND_ALL, .min_minutes = job->min_minutes,
+    ZdQuery query = {.text = job->topic, .kind = ZD_KIND_ALL, .sources = job->source,
+                     .min_minutes = job->min_minutes,
                      .hide_variants = job->hide_variants, .cache = job->cache};
     GPtrArray *titles = zd_search(&query, NULL, NULL, &job->error);
     if (titles) {
@@ -1916,6 +1985,7 @@ static void load_series(Group *group)
     SeriesJob *job = g_new0(SeriesJob, 1);
     job->key = g_strdup(group->key);
     job->topic = g_strdup(group->name);
+    job->source = group->source;
     job->dir = g_strdup(ui.cfg.dir);
     job->min_minutes = ui.cfg.min_minutes;
     job->hide_variants = !ui.cfg.show_signed;
@@ -2140,6 +2210,15 @@ static void add_tile(GtkWidget *box, Group *group)
                                 : "Alle fehlenden Folgen auswählen");
     g_signal_connect(group->tile_check, "toggled", G_CALLBACK(on_tile_toggled), group);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), group->tile_check);
+    GtkWidget *source_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    add_css_class(source_box, "zd-tile-badges");
+    gtk_widget_set_halign(source_box, GTK_ALIGN_END);
+    gtk_widget_set_valign(source_box, GTK_ALIGN_START);
+    gtk_widget_set_margin_end(source_box, 6);
+    gtk_widget_set_margin_top(source_box, 6);
+    gtk_box_pack_start(GTK_BOX(source_box), new_badge(zd_source_label(group->source), NULL),
+                       FALSE, FALSE, 0);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), source_box);
     group->tile_badges = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     add_css_class(group->tile_badges, "zd-tile-badges");
     gtk_widget_set_halign(group->tile_badges, GTK_ALIGN_END);
@@ -2186,6 +2265,7 @@ static bool tile_matches(const Group *group, const char *filter)
     int kind = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.preview_kind));
     if (status == FILTER_MISSING && !c.open) return false;
     if (status == FILTER_DONE && !c.done) return false;
+    if (!(group->source & ui.cfg.sources)) return false;
     if (kind == ZD_KIND_FILMS && !group->is_film) return false;
     if (kind == ZD_KIND_SERIES && group->is_film) return false;
     if (ui.active_genre && !(group->genres && g_strv_contains((const char *const *)group->genres,
@@ -2246,6 +2326,7 @@ static GHashTable *count_genres(void)
     GHashTable *counts = g_hash_table_new(g_str_hash, g_str_equal);
     for (guint i = 0; ui.preview && i < ui.preview->len; i++) {
         const Group *group = ui.preview->pdata[i];
+        if (!(group->source & ui.cfg.sources)) continue;
         for (char **g = group->genres; g && *g; g++) {
             int count = GPOINTER_TO_INT(g_hash_table_lookup(counts, *g));
             g_hash_table_insert(counts, *g, GINT_TO_POINTER(count + 1));
@@ -2415,9 +2496,10 @@ static gpointer preview_thread(gpointer data)
     PreviewJob *job = data;
     ZdQuery films = {.text = "", .kind = ZD_KIND_FILMS, .hide_variants = job->hide_variants,
                      .min_minutes = MAX(job->min_minutes, PREVIEW_FILM_MIN_MINUTES),
-                     .cache = job->cache};
+                     .sources = ZD_SOURCE_ALL, .cache = job->cache};
     ZdQuery series = {.text = "", .kind = ZD_KIND_SERIES, .hide_variants = job->hide_variants,
-                      .min_minutes = job->min_minutes, .cache = job->cache};
+                      .min_minutes = job->min_minutes, .sources = ZD_SOURCE_ALL,
+                      .cache = job->cache};
     GPtrArray *titles = zd_search(&films, NULL, NULL, &job->error);
     GPtrArray *more = titles ? zd_search(&series, NULL, NULL, &job->error) : NULL;
     if (more) {
@@ -2510,6 +2592,7 @@ static GtkWidget *build_preview_page(void)
     g_signal_connect(refresh, "clicked", G_CALLBACK(on_preview_refresh_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(bar), refresh, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(top), bar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(top), build_source_bar(FOOTER_PREVIEW), FALSE, FALSE, 0);
     ui.genre_box = gtk_flow_box_new();
     add_css_class(ui.genre_box, "zd-chips");
     gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(ui.genre_box), GTK_SELECTION_NONE);
@@ -3373,7 +3456,8 @@ static void on_action_about(GSimpleAction *a, GVariant *p, gpointer d)
     (void)d;
     gtk_show_about_dialog(GTK_WINDOW(ui.win), "program-name", APP_NAME, "version", ZD_VERSION,
                           "logo-icon-name", "zdf-downloader", "comments",
-                          "Lädt Filme und Serien aus der ZDF-Mediathek für den privaten Gebrauch "
+                          "Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat für den "
+                          "privaten Gebrauch "
                           "– mit Pause, Tempolimit, allen Sprachen und Untertiteln und auf Wunsch "
                           "als AV1. Suche über MediathekViewWeb.\n"
                           "Information courtesy of IMDb (https://www.imdb.com). "
@@ -3519,6 +3603,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
     rebuild_preview();
     sync_genre_chips();
+    sync_source_buttons();
     on_tick(NULL);
     start_preview_load(ZD_CACHE_USE);
     g_thread_unref(g_thread_new("gpu", gpu_check_thread, NULL));

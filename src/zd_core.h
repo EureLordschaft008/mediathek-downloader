@@ -10,13 +10,17 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define ZD_VERSION "1.2.0"
+#define ZD_VERSION "1.3.0"
 #define ZD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define ZD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define ZD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
 #define ZD_DEFAULT_CPU_RF 35        /* SVT-AV1 (0–63), wie im AV1-Converter */
 
 typedef enum { ZD_KIND_ALL, ZD_KIND_FILMS, ZD_KIND_SERIES } ZdKind;
+/* Mediatheken als Bitmaske */
+typedef enum {
+    ZD_SOURCE_ZDF = 1, ZD_SOURCE_ARD = 2, ZD_SOURCE_3SAT = 4, ZD_SOURCE_ALL = 7
+} ZdSource;
 typedef enum { ZD_QUALITY_HIGH, ZD_QUALITY_MEDIUM, ZD_QUALITY_LOW } ZdQuality;
 typedef enum { ZD_ENCODER_GPU, ZD_ENCODER_CPU } ZdEncoder;
 
@@ -35,6 +39,7 @@ typedef struct {
     gint64 timestamp;           /* Sendezeit (Unix-Zeit) */
     int duration;               /* Sekunden */
     int season, episode;        /* -1 = keine Angabe */
+    int source;                 /* ZD_SOURCE_* */
     bool is_film, is_variant;   /* variant: Gebärdensprache (eigenes Bild) */
     const char *track_label, *track_lang;   /* Sprache laut Titel, NULL = Hauptfassung */
     GPtrArray *audio;           /* ZdTrack*; [0] = Ton der Datei, aus der das Bild kommt */
@@ -47,6 +52,7 @@ typedef enum { ZD_CACHE_OFF, ZD_CACHE_USE, ZD_CACHE_REFRESH } ZdCache;
 typedef struct {
     const char *text;           /* Suchbegriff; leer = neueste Einträge */
     ZdKind kind;
+    int sources;                /* ZD_SOURCE_*, 0 = alle */
     ZdCache cache;
     int min_minutes;            /* kürzere Einträge (Trailer, Clips) ausblenden */
     bool hide_variants;         /* Fassungen mit Gebärdensprache ausblenden */
@@ -132,6 +138,7 @@ bool zd_gpu_available(void);            /* AV1-Encoder per VAAPI nutzbar? (kurze
 GPtrArray *zd_search(const ZdQuery *query, const volatile gint *cancel, bool *truncated,
                      char **error);
 void zd_title_free(gpointer title);
+const char *zd_source_label(int source);    /* "ZDF", "ARD" … */
 const char *zd_title_url(const ZdTitle *title, ZdQuality quality);
 gint64 zd_title_estimate(const ZdTitle *title, ZdQuality quality);  /* Bytes, geschätzt */
 char *zd_target_path(const ZdTitle *title, const char *dir);        /* Pfad der MP4-Datei */

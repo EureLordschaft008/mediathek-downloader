@@ -67,6 +67,12 @@
 #define COVER_EPG_PREFIX "https://epg-image.zdf.de/"
 #define PAGE_RECHECK_SECONDS (7 * 24 * 3600)    /* Seite ohne Bild/Kategorie neu prüfen */
 #define COVER_SIZE "384x216"
+#define COVER_3SAT_PAGE "https://www.3sat.de/"
+#define COVER_3SAT_PREFIX "https://www.3sat.de/assets/"
+#define COVER_ARD_PAGE "https://www.ardmediathek.de/"
+#define COVER_ARD_PREFIX "https://api.ardmediathek.de/image-service/"
+#define ARD_ITEM_API "https://api.ardmediathek.de/page-gateway/pages/ard/item/"
+#define GENRE_TEXT_LENGTH 120   /* so viel der ARD-Beschreibung zählt für die Kategorie */
 #define IMDB_API "https://v3.sg.media-imdb.com/suggestion/x/"
 #define IMDB_RATINGS_URL "https://datasets.imdbws.com/title.ratings.tsv.gz"
 #define IMDB_RATINGS_SECONDS (7 * 24 * 3600)
@@ -101,10 +107,20 @@ static const struct {
     {"(Originalversion)", "Originalfassung", "und"},
 };
 
+/* Mediatheken: Suchwort für den Sender und Name in den Daten (ZDF: auch "ZDF-tivi" …) */
+static const struct {
+    int source;
+    const char *query, *channel, *label;
+} SOURCES[] = {
+    {ZD_SOURCE_ZDF, "zdf", "ZDF", "ZDF"},
+    {ZD_SOURCE_ARD, "ard", "ARD", "ARD"},
+    {ZD_SOURCE_3SAT, "3sat", "3Sat", "3sat"},
+};
+
 /* Rubriken, deren Einträge Filme sind (Stöbern ohne Suchbegriff) */
 static const char *const FILM_TOPICS[] = {"Filme", "Spielfilme", "Spielfilm-Highlights",
-                                          "Der Fernsehfilm der Woche",
-                                          "Das kleine Fernsehspiel"};
+                                          "Der Fernsehfilm der Woche", "Das kleine Fernsehspiel",
+                                          "Filme in der ARD", "Spielfilm"};
 
 /* zusätzliche Datei eines Auftrags: weitere Tonspur oder Untertitel */
 typedef struct {
@@ -486,16 +502,39 @@ static void json_append_escaped(GString *out, const char *text)
     }
 }
 
+/* Mediathek eines Senders; 0 = keine der unterstützten */
+static int source_of(const char *channel)
+{
+    if (!g_ascii_strncasecmp(channel, "ZDF", 3)) return ZD_SOURCE_ZDF;
+    for (size_t i = 1; i < G_N_ELEMENTS(SOURCES); i++)
+        if (!g_ascii_strcasecmp(channel, SOURCES[i].channel)) return SOURCES[i].source;
+    return 0;
+}
+
+const char *zd_source_label(int source)
+{
+    for (size_t i = 0; i < G_N_ELEMENTS(SOURCES); i++)
+        if (SOURCES[i].source == source) return SOURCES[i].label;
+    return "";
+}
+
 /* Staffel, Folge und bereinigten Namen aus dem Titel ableiten */
 static void title_analyse(ZdTitle *t)
 {
-    static GRegex *episode_tag, *new_episodes;
+    static GRegex *episode_tag, *new_episodes, *numbered, *show_suffix;
     static gsize once;
     if (g_once_init_enter(&once)) {
         episode_tag = g_regex_new(" ?\\(S(\\d+)/E(\\d+)\\)", 0, 0, NULL);
         new_episodes = g_regex_new(" - Neue Folgen?\\b", 0, 0, NULL);
+        numbered = g_regex_new("^Folge (\\d+)\\b|\\((\\d+)\\)$", 0, 0, NULL);
+        show_suffix = g_regex_new(" · .*$", 0, 0, NULL);
         g_once_init_leave(&once, 1);
     }
+    t->source = source_of(t->channel);
+    /* Streams lassen sich nicht wie Dateien laden */
+    char **urls[] = {&t->url_high, &t->url_medium, &t->url_low};
+    for (size_t i = 0; i < G_N_ELEMENTS(urls); i++)
+        if (g_str_has_suffix(*urls[i], ".m3u8")) **urls[i] = 0;
     t->season = t->episode = -1;
     GMatchInfo *match = NULL;
     if (g_regex_match(episode_tag, t->title, 0, &match)) {
@@ -505,7 +544,7 @@ static void title_analyse(ZdTitle *t)
         g_free(season);
         g_free(episode);
     }
-    g_match_info_free(match);
+    g_clear_pointer(&match, g_match_info_free);
     char *without_tag = g_regex_replace_literal(episode_tag, t->title, -1, 0, "", 0, NULL);
     t->name = g_regex_replace_literal(new_episodes, without_tag, -1, 0, "", 0, NULL);
     g_free(without_tag);
@@ -518,12 +557,38 @@ static void title_analyse(ZdTitle *t)
         break;
     }
     g_strstrip(t->name);
+    if (t->source == ZD_SOURCE_ARD) {                   /* "… · Praxis mit Meerblick" */
+        char *short_name = g_regex_replace_literal(show_suffix, t->name, -1, 0, "", 0, NULL);
+        g_free(t->name);
+        t->name = short_name;
+    }
 
     t->is_variant = strstr(t->title, "Gebärdensprache") != NULL;
     char *topic = g_utf8_strdown(t->topic, -1);
     t->is_film = t->season < 0 && (strstr(topic, "film") || strstr(topic, "fernsehspiel")
                                    || strstr(topic, "kino"));
     g_free(topic);
+    /* Die ARD nennt oft nur "Folge 5": ohne Angabe gilt Staffel 1 */
+    if (t->source != ZD_SOURCE_ZDF && t->season < 0 && !t->is_film &&
+        g_regex_match(numbered, t->name, 0, &match)) {
+        char *first = g_match_info_fetch(match, 1), *second = g_match_info_fetch(match, 2);
+        t->season = 1;
+        t->episode = atoi(first && *first ? first : second);
+        g_free(first);
+        g_free(second);
+    }
+    g_match_info_free(match);
+    /* Titel wie "Der Prozess ()" */
+    if (g_str_has_suffix(t->name, "()")) {
+        t->name[strlen(t->name) - 2] = 0;
+        g_strchomp(t->name);
+    }
+    /* "Der Nachtmann (1)": die Nummer steht schon in der Folge */
+    char *number = t->source != ZD_SOURCE_ZDF ? strrchr(t->name, '(') : NULL;
+    if (number && t->episode >= 0 && g_ascii_isdigit(number[1]) && g_str_has_suffix(t->name, ")")) {
+        *number = 0;
+        g_strchomp(t->name);
+    }
 }
 
 /* Ein Objekt aus "results" lesen */
@@ -674,10 +739,11 @@ static bool search_cache_read(const char *path, char **reply)
 }
 
 /* Eine Seite der Suche abrufen */
-static bool fetch_page(const char *text, const char *field, int min_seconds, int offset,
-                       ZdCache cache, GPtrArray *out, int *total, char **error)
+static bool fetch_page(const char *channel, const char *text, const char *field, int min_seconds,
+                       int offset, ZdCache cache, GPtrArray *out, int *total, char **error)
 {
-    GString *body = g_string_new("{\"queries\":[{\"fields\":[\"channel\"],\"query\":\"zdf\"}");
+    GString *body = g_string_new(NULL);
+    g_string_printf(body, "{\"queries\":[{\"fields\":[\"channel\"],\"query\":\"%s\"}", channel);
     if (text && *text) {
         g_string_append_printf(body, ",{\"fields\":[%s],\"query\":\"", field);
         json_append_escaped(body, text);
@@ -712,14 +778,16 @@ static bool fetch_page(const char *text, const char *field, int min_seconds, int
 }
 
 /* Alle Seiten einer Anfrage abrufen, begrenzt auf SEARCH_MAX */
-static bool fetch_all(const char *text, const char *field, int min_seconds, ZdCache cache,
-                      GPtrArray *out, const volatile gint *cancel, bool *truncated, char **error)
+static bool fetch_all(const char *channel, const char *text, const char *field, int min_seconds,
+                      ZdCache cache, GPtrArray *out, const volatile gint *cancel, bool *truncated,
+                      char **error)
 {
     int total = 0;
     for (int offset = 0; offset < SEARCH_MAX; offset += PAGE_SIZE) {
         if (cancel && g_atomic_int_get(cancel)) return true;
         guint before = out->len;
-        if (!fetch_page(text, field, min_seconds, offset, cache, out, &total, error)) return false;
+        if (!fetch_page(channel, text, field, min_seconds, offset, cache, out, &total, error))
+            return false;
         if (out->len == before || offset + PAGE_SIZE >= total) return true;
     }
     if (truncated) *truncated = true;
@@ -729,12 +797,14 @@ static bool fetch_all(const char *text, const char *field, int min_seconds, ZdCa
 /* Eintrag anzeigen? (Filter, die die API nicht kennt) */
 static bool title_matches(const ZdTitle *t, const ZdQuery *query)
 {
-    if (g_ascii_strncasecmp(t->channel, "ZDF", 3)) return false;
+    if (!(t->source & (query->sources ? query->sources : ZD_SOURCE_ALL))) return false;
     if (!*t->url_high && !*t->url_medium && !*t->url_low) return false;
     if (t->duration < query->min_minutes * 60) return false;
     if (query->hide_variants && t->is_variant) return false;
     if (query->kind == ZD_KIND_FILMS && !t->is_film) return false;
-    if (query->kind == ZD_KIND_SERIES && t->season < 0) return false;
+    if (query->kind == ZD_KIND_SERIES && (t->is_film ||
+                                          (t->season < 0 && t->source == ZD_SOURCE_ZDF)))
+        return false;
     return true;
 }
 
@@ -742,7 +812,8 @@ static bool title_matches(const ZdTitle *t, const ZdQuery *query)
 static char *variant_key(const ZdTitle *t)
 {
     char *lower = g_utf8_strdown(t->name, -1);
-    char *key = g_strdup_printf("%s\n%s\n%d\n%d", t->topic, lower, t->season, t->episode);
+    char *key = g_strdup_printf("%d\n%s\n%s\n%d\n%d", t->source, t->topic, lower, t->season,
+                                t->episode);
     g_free(lower);
     return key;
 }
@@ -758,7 +829,15 @@ static void add_subtitle(ZdTitle *main_title, const ZdTitle *source)
         if (!strcmp(known->label, label)) return;
     }
     char *url = g_strdup(source->url_subtitle);
-    if (g_str_has_suffix(url, ".xml")) strcpy(url + strlen(url) - 4, ".vtt");
+    char *ard = strstr(url, "/ebutt/");
+    if (g_str_has_suffix(url, ".xml")) {
+        strcpy(url + strlen(url) - 4, ".vtt");
+    } else if (ard) {                       /* ARD: dieselben Untertitel gibt es als WebVTT */
+        *ard = 0;
+        char *webvtt = g_strconcat(url, "/webvtt/", ard + strlen("/ebutt/"), ".vtt", NULL);
+        g_free(url);
+        url = webvtt;
+    }
     g_ptr_array_add(main_title->subtitles, track_new(label, lang, url));
     g_free(url);
 }
@@ -798,25 +877,55 @@ static void merge_variants(GPtrArray *raw)
     g_hash_table_destroy(mains);
 }
 
-GPtrArray *zd_search(const ZdQuery *query, const volatile gint *cancel, bool *truncated,
-                     char **error)
+/* Eine Mediathek abfragen */
+static bool search_source(const char *channel, const ZdQuery *query, GPtrArray *raw,
+                          const volatile gint *cancel, bool *truncated, char **error)
 {
-    GPtrArray *raw = g_ptr_array_new_with_free_func(zd_title_free);
     const char *text = query->text ? query->text : "";
     const char *both = "\"topic\",\"title\"";
     int min_seconds = query->min_minutes * 60;
     bool ok = true;
-    if (truncated) *truncated = false;
     if (!*text && query->kind == ZD_KIND_FILMS) {
         for (size_t i = 0; ok && i < G_N_ELEMENTS(FILM_TOPICS); i++)
-            ok = fetch_all(FILM_TOPICS[i], "\"topic\"", min_seconds, query->cache, raw, cancel,
-                           truncated, error);
+            ok = fetch_all(channel, FILM_TOPICS[i], "\"topic\"", min_seconds, query->cache, raw,
+                           cancel, truncated, error);
     } else if (!*text && query->kind == ZD_KIND_SERIES) {
-        ok = fetch_all("", both, MAX(min_seconds, BROWSE_MIN_SECONDS), query->cache, raw, cancel,
-                       truncated, error);
+        ok = fetch_all(channel, "", both, MAX(min_seconds, BROWSE_MIN_SECONDS), query->cache, raw,
+                       cancel, truncated, error);
     } else {
-        ok = fetch_all(text, both, min_seconds, query->cache, raw, cancel, truncated, error);
+        ok = fetch_all(channel, text, both, min_seconds, query->cache, raw, cancel, truncated,
+                       error);
     }
+    return ok;
+}
+
+/* Beim Stöbern nach Serien: Einzelsendungen ohne Staffelangabe sind keine Serie */
+static void drop_single_shows(GPtrArray *titles)
+{
+    GHashTable *counts = g_hash_table_new(g_str_hash, g_str_equal);
+    for (guint i = 0; i < titles->len; i++) {
+        const char *topic = ((ZdTitle *)titles->pdata[i])->topic;
+        int count = GPOINTER_TO_INT(g_hash_table_lookup(counts, topic));
+        g_hash_table_insert(counts, (char *)topic, GINT_TO_POINTER(count + 1));
+    }
+    for (guint i = titles->len; i-- > 0;) {
+        const ZdTitle *t = titles->pdata[i];
+        if (t->season < 0 && GPOINTER_TO_INT(g_hash_table_lookup(counts, t->topic)) < 2)
+            g_ptr_array_remove_index(titles, i);
+    }
+    g_hash_table_destroy(counts);
+}
+
+GPtrArray *zd_search(const ZdQuery *query, const volatile gint *cancel, bool *truncated,
+                     char **error)
+{
+    GPtrArray *raw = g_ptr_array_new_with_free_func(zd_title_free);
+    bool ok = true;
+    if (truncated) *truncated = false;
+    int sources = query->sources ? query->sources : ZD_SOURCE_ALL;
+    for (size_t i = 0; ok && i < G_N_ELEMENTS(SOURCES); i++)
+        if (sources & SOURCES[i].source)
+            ok = search_source(SOURCES[i].query, query, raw, cancel, truncated, error);
     if (!ok) {
         g_ptr_array_free(raw, TRUE);
         return NULL;
@@ -827,16 +936,23 @@ GPtrArray *zd_search(const ZdQuery *query, const volatile gint *cancel, bool *tr
     /* Filtern; dieselbe Videodatei kann unter mehreren Rubriken stehen */
     GPtrArray *result = g_ptr_array_new_with_free_func(zd_title_free);
     GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
+    GHashTable *episodes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint i = 0; i < raw->len; i++) {
         ZdTitle *t = raw->pdata[i];
         if (!t) continue;
         const char *url = zd_title_url(t, ZD_QUALITY_HIGH);
         if (!title_matches(t, query) || !g_hash_table_add(seen, (char *)url)) continue;
+        /* Die ARD führt manche Folge doppelt: mit Staffelangabe und nur mit Nummer */
+        if (t->source != ZD_SOURCE_ZDF && t->season >= 0 && !t->track_label &&
+            !g_hash_table_add(episodes, variant_key(t)))
+            continue;
         raw->pdata[i] = NULL;
         g_ptr_array_add(result, t);
     }
     g_hash_table_destroy(seen);
+    g_hash_table_destroy(episodes);
     g_ptr_array_free(raw, TRUE);
+    if (query->kind == ZD_KIND_SERIES) drop_single_shows(result);
     return result;
 }
 
@@ -1139,20 +1255,27 @@ ZdStatus zd_title_status(const ZdTitle *t, const char *dir, char **path)
  * im einstellbaren Bilderordner. Die Bildgröße steht je nach Server in der Adresse
  * (~1280x720) oder im Parameter (layout=1280x720).
  * ------------------------------------------------------------------------- */
+/* Text hinter key bis zum Anführungszeichen; NULL = nicht gefunden */
+static char *text_after(const char *page, const char *key)
+{
+    const char *start = strstr(page, key);
+    if (!start) return NULL;
+    start += strlen(key);
+    const char *end = strchr(start, '"');
+    return end ? g_strndup(start, (gsize)(end - start)) : NULL;
+}
+
 /* Adresse des Bildes in der kleinen Größe; NULL = die Seite nennt keines */
 static char *cover_url(const char *page)
 {
-    static const char KEY[] = "\"thumbnailUrl\":\"";
-    const char *start = strstr(page, KEY);
-    if (!start) return NULL;
-    start += strlen(KEY);
-    const char *end = strchr(start, '"');
-    if (!end) return NULL;
-    char *url = g_strndup(start, (gsize)(end - start)), *result = NULL;
+    char *url = text_after(page, "\"thumbnailUrl\":\""), *result = NULL;
+    if (!url) url = text_after(page, "property=\"og:image\" content=\"");
+    if (!url) return NULL;
     char *tilde = strrchr(url, '~'), *layout = strstr(url, "layout=");
     if (strpbrk(url, " \\'")) {
         /* keine gültige Adresse */
-    } else if (tilde && g_str_has_prefix(url, COVER_URL_PREFIX)) {
+    } else if (tilde && (g_str_has_prefix(url, COVER_URL_PREFIX) ||
+                         g_str_has_prefix(url, COVER_3SAT_PREFIX))) {
         const char *query = strchr(tilde, '?');
         *tilde = 0;
         result = g_strconcat(url, "~" COVER_SIZE, query ? query : "", NULL);
@@ -1221,30 +1344,103 @@ static bool page_info_stale(const char *info, const char *path)
            time(NULL) - stat_buf.st_mtime >= PAGE_RECHECK_SECONDS;
 }
 
+/* ARD und 3sat nennen keine Kategorien: aus Stichwörtern im Text ableiten */
+static void genres_from_text(const char *text, GString *out)
+{
+    static const struct {
+        const char *word, *genre;
+    } WORDS[] = {
+        {"tatort", "Krimi"}, {"polizeiruf", "Krimi"}, {"krimi", "Krimi"}, {"thriller", "Thriller"},
+        {"komödie", "Komödie"}, {"drama", "Drama"}, {"doku", "Dokumentation"},
+        {"reportage", "Reportage"}, {"tagesschau", "Nachrichten"},
+        {"tagesthemen", "Nachrichten"}, {"sportschau", "Sport"}, {"kabarett", "Kabarett"},
+        {"spielfilm", "Spielfilm"}, {"fernsehfilm", "Spielfilm"},
+    };
+    char *lower = g_utf8_strdown(text, -1);
+    for (size_t i = 0; i < G_N_ELEMENTS(WORDS); i++) {
+        char *line = g_strconcat(WORDS[i].genre, "\n", NULL);
+        if (strstr(lower, WORDS[i].word) && !strstr(out->str, line))
+            g_string_append(out, line);
+        g_free(line);
+    }
+    g_free(lower);
+}
+
+/* Antwort der ARD-Schnittstelle zum Merkzettel machen */
+static void ard_page_info(const char *reply, GString *out)
+{
+    const char *player = strstr(reply, "\"geoblocked\"");
+    char *image = text_after(player ? player : reply, "\"src\":\"");
+    char *rating = text_after(reply, "\"maturityContentRating\":\"");
+    char *show = text_after(reply, "\"page_show\":\"");
+    char *synopsis = text_after(player ? player : reply, "\"synopsis\":\"");
+    char *width = image ? strstr(image, "{width}") : NULL;
+    if (width && g_str_has_prefix(image, COVER_ARD_PREFIX) && !strpbrk(image, " \\'")) {
+        *width = 0;
+        g_string_append_printf(out, "%s384%s", image, width + strlen("{width}"));
+    }
+    g_string_append_c(out, '\n');
+    if (rating && g_str_has_prefix(rating, "FSK") && g_ascii_isdigit(rating[3]))
+        g_string_append_printf(out, "FSK %s", rating + 3);
+    g_string_append_c(out, '\n');
+    if (synopsis && strlen(synopsis) > GENRE_TEXT_LENGTH) synopsis[GENRE_TEXT_LENGTH] = 0;
+    char *text = g_strconcat(show ? show : "", " ", synopsis ? synopsis : "", NULL);
+    genres_from_text(text, out);
+    g_free(text);
+    g_free(image);
+    g_free(rating);
+    g_free(show);
+    g_free(synopsis);
+}
+
+/* Merkzettel aus einer Seite von zdf.de oder 3sat.de */
+static void html_page_info(const char *website, const char *reply, GString *out)
+{
+    char *url = cover_url(reply);
+    g_string_assign(out, url ? url : "");
+    g_string_append_c(out, '\n');
+    g_free(url);
+    page_genres(reply, out);
+    if (g_str_has_prefix(website, COVER_3SAT_PAGE)) genres_from_text(website, out);
+}
+
+/* Bei der ARD liefert die Schnittstelle dieselben Angaben wie die Seite, nur verlässlicher */
+static char *page_address(const char *website)
+{
+    if (g_str_has_prefix(website, COVER_ARD_PAGE)) {
+        const char *id = strrchr(website, '/');
+        return g_strconcat(ARD_ITEM_API, id + 1, "?devicetype=pc&embedded=false", NULL);
+    }
+    return g_strdup(website);
+}
+
 /* Merkzettel zur Seite website: Bildadresse, FSK, danach je Zeile eine Kategorie.
  * Einmal geholt bleibt er liegen. NULL = Seite nicht erreichbar. */
 static char *page_info(const char *website)
 {
-    if (!g_str_has_prefix(website, COVER_PAGE_PREFIX)) return NULL;
+    bool ard = g_str_has_prefix(website, COVER_ARD_PAGE);
+    if (!ard && !g_str_has_prefix(website, COVER_PAGE_PREFIX) &&
+        !g_str_has_prefix(website, COVER_3SAT_PAGE))
+        return NULL;
     char *path = cache_file(website, ".info"), *info = NULL;
     if (g_file_get_contents(path, &info, NULL, NULL) && !page_info_stale(info, path)) {
         g_free(path);
         return info;
     }
-    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, (char *)website, NULL};
+    char *address = page_address(website);
+    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, address, NULL};
     char *reply = NULL, *messages = NULL;
     int rc = run_capture(argv, &reply, &messages);
+    g_free(address);
     if (rc == CURL_HTTP_ERROR) {        /* Seite ist weg: nicht bei jedem Start fragen */
         g_file_set_contents(path, "\n\n", -1, NULL);
     } else if (rc == 0 && reply) {
-        char *url = cover_url(reply);
-        GString *fresh = g_string_new(url ? url : "");
-        g_string_append_c(fresh, '\n');
-        page_genres(reply, fresh);
+        GString *fresh = g_string_new(NULL);
+        if (ard) ard_page_info(reply, fresh);
+        else html_page_info(website, reply, fresh);
         g_file_set_contents(path, fresh->str, (gssize)fresh->len, NULL);
         g_free(info);
         info = g_string_free(fresh, FALSE);
-        g_free(url);
     }
     g_free(reply);
     g_free(messages);

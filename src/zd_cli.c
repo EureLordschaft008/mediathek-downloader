@@ -29,6 +29,7 @@ static const char USAGE[] =
     "  --serien               nur Serien\n"
     "  --mindestlaenge MIN    kürzere Einträge ausblenden (Standard 10)\n"
     "  --varianten            Fassungen mit Gebärdensprache anzeigen\n"
+    "  --mediathek LISTE      zdf, ard, 3sat oder alle, z. B. zdf,ard (Standard alle)\n"
     "  --staffel N            nur diese Staffel\n"
     "  --nur-fehlende         schon geladene Titel ausblenden\n"
     "  --verlauf              alles anzeigen, was schon geladen wurde\n"
@@ -80,6 +81,25 @@ static bool *parse_selection(const char *text, int count)
     return selected;
 }
 
+/* Liste wie "zdf,ard" -> Bitmaske */
+static int parse_sources(const char *text)
+{
+    int sources = 0;
+    char **parts = g_strsplit(text, ",", -1);
+    for (int i = 0; parts[i]; i++) {
+        if (!g_ascii_strcasecmp(parts[i], "zdf")) sources |= ZD_SOURCE_ZDF;
+        else if (!g_ascii_strcasecmp(parts[i], "ard")) sources |= ZD_SOURCE_ARD;
+        else if (!g_ascii_strcasecmp(parts[i], "3sat")) sources |= ZD_SOURCE_3SAT;
+        else if (!g_ascii_strcasecmp(parts[i], "alle")) sources = ZD_SOURCE_ALL;
+        else {
+            fprintf(stderr, "Unbekannte Mediathek %s\n", parts[i]);
+            exit(2);
+        }
+    }
+    g_strfreev(parts);
+    return sources;
+}
+
 static const char *const STATUS_TEXT[] = {"", "angefangen", "in Warteschlange", "geladen",
                                           "Datei fehlt"};
 
@@ -119,7 +139,7 @@ static void print_titles(GPtrArray *titles, const char *dir)
             append_labels(tracks, t->subtitles);
             g_string_append_c(tracks, ']');
         }
-        printf("%4u  %-14s  %-24.24s  %3d min  %s%s\n", i + 1,
+        printf("%4u  %-4s  %-14s  %-24.24s  %3d min  %s%s\n", i + 1, zd_source_label(t->source),
                STATUS_TEXT[zd_title_status(t, dir, NULL)], t->topic, t->duration / 60, t->title,
                tracks->str);
         g_string_free(tracks, TRUE);
@@ -193,6 +213,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--nur-fehlende")) only_missing = true;
         else if (!strcmp(a, "--verlauf")) show_history = true;
         else if (!strcmp(a, "--staffel")) season = atoi(option_value(argc, argv, &i));
+        else if (!strcmp(a, "--mediathek"))
+            query.sources = parse_sources(option_value(argc, argv, &i));
         else if (!strcmp(a, "--ohne-ton"))
             skip_audio = g_strsplit(option_value(argc, argv, &i), ",", -1);
         else if (!strcmp(a, "--ohne-untertitel"))

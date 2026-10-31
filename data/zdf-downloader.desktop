@@ -2,10 +2,10 @@
 Type=Application
 Name=ZDF-Downloader
 GenericName=Mediathek-Downloader
-Comment=Filme und Serien aus der ZDF-Mediathek laden
+Comment=Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat laden
 Exec=zdf-downloader
 Icon=zdf-downloader
 Terminal=false
 Categories=AudioVideo;Video;
-Keywords=ZDF;Mediathek;Download;Serie;Film;AV1;
+Keywords=ZDF;ARD;3sat;Mediathek;Download;Serie;Film;AV1;
 StartupWMClass=zdf-downloader

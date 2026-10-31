@@ -1,6 +1,6 @@
-# ZDF-Downloader 1.2.0
+# ZDF-Downloader 1.3.0
 
-Lädt Filme und Serien aus der ZDF-Mediathek – einzelne Folgen, ganze Staffeln oder eine Serie mit
+Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat – einzelne Folgen, ganze Staffeln oder eine Serie mit
 allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche (`zdf-downloader`, Aufbau und
 Optik wie beim AV1-Converter) und als Terminal-Version (`zdf-downloader-cli`, z. B. für lange Läufe
 in tmux).
@@ -16,7 +16,7 @@ sudo apt install zdf-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./zdf-downloader_1.2.0-1_amd64.deb
+sudo apt install ./zdf-downloader_1.3.0-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
@@ -24,6 +24,9 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
 
 ## Was es kann
 
+- **Mediatheken** – Suche und Vorschau laufen wahlweise über eine, mehrere oder alle Mediatheken.
+  Aus „Alle“ heraus wählt ein Klick genau eine, weitere Klicks nehmen andere dazu. Die Auswahl gilt
+  für beide Seiten und bleibt gespeichert.
 - **Vorschau** – die Startseite zeigt neue Filme und Serien als Kacheln mit Titelbild. Ein Häkchen
   merkt einen Film vor, bei einer Serie alle fehlenden Folgen. Ein Klick auf die Kachel öffnet
   Bild, Beschreibung und alle Staffeln und Folgen zum einzelnen Auswählen. Die Auswahl gilt
@@ -116,8 +119,13 @@ Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt d
   Sie sind ausgeblendet und lassen sich in den Einstellungen einschalten.
 - **Titelbilder** kommen von den Seiten des ZDF. Nicht jeder Titel hat eines; dann erscheint ein
   Platzhalter. Eine Serie zeigt das Bild ihrer neuesten Folge.
-- **Kategorien** stammen von den Seiten des ZDF. Eine Serie übernimmt die Kategorien ihrer neuesten
-  Folge. Ein Titel ohne Angabe erscheint nur unter „Alle“.
+- **Kategorien** stammen beim ZDF von dessen Seiten. ARD und 3sat nennen keine; dort leitet das
+  Programm sie aus Stichwörtern in Sendungsname und Beschreibung ab, zum Beispiel Krimi bei „Tatort“.
+  Das ist gröber, und viele Titel haben dann keine Kategorie. Sie erscheinen nur unter „Alle“. Eine
+  Serie übernimmt die Kategorien ihrer neuesten Folge.
+- **Staffeln bei der ARD:** Nennt ein Titel nur „Folge 5“, zählt er zu Staffel 1. Serien ganz ohne
+  Nummern wie der Tatort stehen unter „Einzelne Sendungen“.
+- **Andere Sender:** ARTE und die Dritten sind nicht dabei, nur was unter „ARD“ geführt wird.
 - **Die Suche** läuft über [MediathekViewWeb](https://mediathekviewweb.de), nicht über das ZDF. Ist
   dieser Dienst nicht erreichbar, gibt es keine Treffer.
 
