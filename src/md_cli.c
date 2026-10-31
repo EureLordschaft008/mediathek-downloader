@@ -29,7 +29,8 @@ static const char USAGE[] =
     "  --serien               nur Serien\n"
     "  --mindestlaenge MIN    kürzere Einträge ausblenden (Standard 10)\n"
     "  --varianten            Fassungen mit Gebärdensprache anzeigen\n"
-    "  --mediathek LISTE      zdf, ard, 3sat oder alle, z. B. zdf,ard (Standard alle)\n"
+    "  --mediathek LISTE      zdf, ard, 3sat, zdfneo, one, wdr, swr, ndr, rbb oder alle,\n"
+    "                         z. B. zdf,ard (Standard alle)\n"
     "  --staffel N            nur diese Staffel\n"
     "  --nur-fehlende         schon geladene Titel ausblenden\n"
     "  --verlauf              alles anzeigen, was schon geladen wurde\n"
@@ -90,6 +91,12 @@ static int parse_sources(const char *text)
         if (!g_ascii_strcasecmp(parts[i], "zdf")) sources |= MD_SOURCE_ZDF;
         else if (!g_ascii_strcasecmp(parts[i], "ard")) sources |= MD_SOURCE_ARD;
         else if (!g_ascii_strcasecmp(parts[i], "3sat")) sources |= MD_SOURCE_3SAT;
+        else if (!g_ascii_strcasecmp(parts[i], "zdfneo")) sources |= MD_SOURCE_ZDFNEO;
+        else if (!g_ascii_strcasecmp(parts[i], "one")) sources |= MD_SOURCE_ONE;
+        else if (!g_ascii_strcasecmp(parts[i], "wdr")) sources |= MD_SOURCE_WDR;
+        else if (!g_ascii_strcasecmp(parts[i], "swr")) sources |= MD_SOURCE_SWR;
+        else if (!g_ascii_strcasecmp(parts[i], "ndr")) sources |= MD_SOURCE_NDR;
+        else if (!g_ascii_strcasecmp(parts[i], "rbb")) sources |= MD_SOURCE_RBB;
         else if (!g_ascii_strcasecmp(parts[i], "alle")) sources = MD_SOURCE_ALL;
         else {
             fprintf(stderr, "Unbekannte Mediathek %s\n", parts[i]);

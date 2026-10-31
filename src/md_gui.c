@@ -1,9 +1,10 @@
 /*
  * Mediathek Downloader – grafische Oberfläche (GTK 3)
  * ===================================================
- * Aufbau und Optik wie beim AV1-Converter. Vier Seiten, oben umschaltbar:
+ * Aufbau und Optik wie beim AV1-Converter. Fünf Seiten, oben umschaltbar:
  *   Vorschau       Filme und Serien als Kacheln mit Bild; Häkchen sammeln eine Auswahl, die
  *                  Detailansicht zeigt Serie -> Staffel -> Folge mit dem Stand jeder Folge
+ *   Neue Folgen    was bei schon geladenen Serien seit dem letzten Download dazugekommen ist
  *   Downloads      Warteschlange mit Pause, Fortsetzen und Tempolimit
  *   Bibliothek     alles, was schon geladen wurde, nach Sendung sortiert
  *   Einstellungen  Speicherort, Qualität, AV1
@@ -13,7 +14,7 @@
  * 500 ms den Stand ab. Der gesamte Zustand der Oberfläche liegt in der Struktur "ui".
  *
  * Aufbau dieser Datei: kleine Helfer – Einstellungen – Trefferbaum – Spurenauswahl –
- * Seite Vorschau – Seite Downloads – Seite Bibliothek – Seite Einstellungen –
+ * Seite Vorschau – Seite Neue Folgen – Seite Downloads – Seite Bibliothek – Seite Einstellungen –
  * Fenster, Menü, Programmstart
  *
  * Aufruf:
@@ -45,21 +46,23 @@
 #define HOVER_DELAY_MS 500     /* so lange ruht die Maus auf der Kachel bis zum Popup */
 #define GENRE_TICKS 4           /* neue Kategorien alle so vielen Timer-Schläge zeigen */
 #define FOOTER_PREVIEW 0
-#define FOOTER_COUNT 1
+#define FOOTER_NEWS 1
+#define FOOTER_COUNT 2
 #define NO_GENRE "Ohne Kategorie"
+#define MD_SOURCE_OLD_ALL 7     /* "Alle" bis Version 1.4 */
 #define IMDB_THREADS 2
 #define ALL_LANGUAGES "Alle Sprachen"
-#define SOURCE_COUNT 3
+#define SOURCE_COUNT 9
 
-static const int SOURCE_BITS[SOURCE_COUNT] = {MD_SOURCE_ZDF, MD_SOURCE_ARD, MD_SOURCE_3SAT};
+static const int SOURCE_BITS[SOURCE_COUNT] = {MD_SOURCE_ZDF, MD_SOURCE_ZDFNEO, MD_SOURCE_ARD,
+                                              MD_SOURCE_ONE, MD_SOURCE_WDR, MD_SOURCE_SWR,
+                                              MD_SOURCE_NDR, MD_SOURCE_RBB, MD_SOURCE_3SAT};
 static const char *const KIND_TEXT[3] = {"Alles", "Filme", "Serien"};
-static const char *const FILTER_TEXT[3] = {"Alle anzeigen", "Nur fehlende", "Nur geladene"};
 static const char *const QUALITY_TEXT[3] = {"Hoch – 1080p (ca. 4,5 GB je 90 min)",
                                             "Mittel (ca. 2,3 GB je 90 min)",
                                             "Niedrig (ca. 0,5 GB je 90 min)"};
 static const char *const ENCODER_TEXT[2] = {"GPU – schnell (VAAPI)", "CPU – langsam (SVT-AV1)"};
 
-enum { FILTER_ALL, FILTER_MISSING, FILTER_DONE };
 typedef enum { ROW_GROUP, ROW_SEASON, ROW_ITEM } RowKind;
 
 /* ein Treffer samt Stand */
@@ -113,7 +116,18 @@ typedef struct {
     GPtrArray *refs;            /* RowRef* der angelegten Zeilen */
     GPtrArray *groups;          /* Group* */
     int limit;                  /* angezeigte Zeilen */
+    const char *empty_text;     /* NULL = "Keine passenden Einträge." */
 } ResultTree;
+
+/* Neue Folgen der geladenen Serien im Hintergrund suchen */
+typedef struct {
+    char **topics;              /* Serien aus dem Verlauf */
+    gint64 *finished;           /* je Serie: letzter Download */
+    char *dir;
+    int min_minutes;
+    bool hide_variants;
+    GPtrArray *items;           /* Item* */
+} NewsJob;
 
 /* Kategorien eines Titels von IMDb */
 typedef struct {
@@ -184,14 +198,19 @@ typedef struct {
     bool quitting, gpu_ok;
     guint inhibit_cookie;
 
+    /* Neue Folgen */
+    ResultTree news_tree;
+    GtkWidget *news_page, *news_note, *news_spinner;
+    bool news_busy;
+
     /* Fußzeile und Mediatheken */
     GtkWidget *selection_labels[FOOTER_COUNT], *target_labels[FOOTER_COUNT];
     GtkWidget *download_buttons[FOOTER_COUNT];
-    GtkWidget *source_buttons[FOOTER_COUNT][SOURCE_COUNT + 1];  /* zuletzt "Alle" */
+    GtkWidget *source_buttons[SOURCE_COUNT + 1];    /* zuletzt "Alle" */
     bool updating_checks;
 
     /* Vorschau */
-    GtkWidget *preview_search, *preview_kind, *preview_filter, *preview_spinner, *preview_note;
+    GtkWidget *preview_search, *preview_kind, *preview_spinner, *preview_note;
     GtkWidget *preview_language;
     GtkWidget *genre_box, *genre_all;
     GHashTable *genre_chips;    /* Kategorie -> GtkToggleButton */
@@ -230,6 +249,7 @@ static UiState ui;
 static void rebuild_results(void);
 static void rebuild_tree(ResultTree *tree);
 static void rebuild_preview(void);
+static void start_news_load(void);
 static void update_tiles(void);
 static void update_genres(void);
 static void rebuild_library(void);
@@ -651,6 +671,7 @@ static void settings_load(void)
     c->limit_mb = CLAMP(settings_int(file, "LimitMBs", 10, 1, 1000), 1, 1000);
     c->limit_on = settings_bool(file, "LimitAktiv", false);
     c->sources = settings_int(file, "Mediatheken", MD_SOURCE_ALL, 1, MD_SOURCE_ALL);
+    if (c->sources == MD_SOURCE_OLD_ALL) c->sources = MD_SOURCE_ALL;
     c->convert = settings_bool(file, "AV1", false);
     c->keep_original = settings_bool(file, "OriginalBehalten", false);
     c->show_signed = settings_bool(file, "Gebaerdensprache", false);
@@ -942,6 +963,7 @@ static void update_tree_checks(const ResultTree *tree)
 static void update_checks(void)
 {
     ui.updating_checks = true;
+    update_tree_checks(&ui.news_tree);
     update_tree_checks(&ui.detail_tree);
     update_tiles();
     ui.updating_checks = false;
@@ -1216,13 +1238,15 @@ static void rebuild_tree(ResultTree *tree)
         }
     }
     if (more) add_note_row(tree, "Weitere anzeigen …", true);
-    else if (!rows) add_note_row(tree, "Keine passenden Einträge.", false);
+    else if (!rows) add_note_row(tree, tree->empty_text ? tree->empty_text
+                                                        : "Keine passenden Einträge.", false);
     gtk_widget_show_all(tree->list);
     update_checks();
 }
 
 static void rebuild_results(void)
 {
+    if (ui.news_tree.list) rebuild_tree(&ui.news_tree);
     if (ui.detail_tree.list) rebuild_tree(&ui.detail_tree);
 }
 
@@ -1287,6 +1311,7 @@ static void update_series_news(void)
 static void refresh_statuses(void)
 {
     bool changed = refresh_groups(ui.preview);
+    changed |= refresh_groups(ui.news_tree.groups);
     update_series_news();
     if (changed) rebuild_results();
     else update_tiles();
@@ -1309,12 +1334,13 @@ static void collect_from(GPtrArray *out, GHashTable *seen, GPtrArray *groups)
     }
 }
 
-/* alle gewählten Treffer der Vorschau */
+/* alle gewählten Treffer aus Vorschau und Neue Folgen */
 static GPtrArray *collect_selected(void)
 {
     GPtrArray *out = g_ptr_array_new();
     GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
     collect_from(out, seen, ui.preview);
+    collect_from(out, seen, ui.news_tree.groups);
     g_hash_table_destroy(seen);
     return out;
 }
@@ -1476,18 +1502,16 @@ static void on_download_clicked(GtkButton *b, gpointer d)
     gtk_stack_set_visible_child(GTK_STACK(ui.stack), ui.downloads_page);
 }
 
-/* Knöpfe beider Seiten zum gewählten Stand bringen */
+/* Knöpfe zum gewählten Stand bringen */
 static void sync_source_buttons(void)
 {
     ui.updating_chips = true;
-    for (int page = 0; page < FOOTER_COUNT; page++) {
-        for (int i = 0; i < SOURCE_COUNT; i++)
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.source_buttons[page][i]),
-                                         ui.cfg.sources != MD_SOURCE_ALL &&
-                                         (ui.cfg.sources & SOURCE_BITS[i]));
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.source_buttons[page][SOURCE_COUNT]),
-                                     ui.cfg.sources == MD_SOURCE_ALL);
-    }
+    for (int i = 0; i < SOURCE_COUNT; i++)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.source_buttons[i]),
+                                     ui.cfg.sources != MD_SOURCE_ALL &&
+                                     (ui.cfg.sources & SOURCE_BITS[i]));
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.source_buttons[SOURCE_COUNT]),
+                                 ui.cfg.sources == MD_SOURCE_ALL);
     ui.updating_chips = false;
 }
 
@@ -1509,7 +1533,7 @@ static void on_source_toggled(GtkToggleButton *b, gpointer d)
 }
 
 /* Zeile "Mediathek: ZDF ARD 3sat Alle" */
-static GtkWidget *build_source_bar(int page)
+static GtkWidget *build_source_bar(void)
 {
     GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_widget_set_margin_top(bar, 6);
@@ -1523,7 +1547,7 @@ static GtkWidget *build_source_bar(int page)
         add_css_class(b, "zd-chip");
         g_signal_connect(b, "toggled", G_CALLBACK(on_source_toggled), GINT_TO_POINTER(bit));
         gtk_box_pack_start(GTK_BOX(bar), b, FALSE, FALSE, 0);
-        ui.source_buttons[page][i] = b;
+        ui.source_buttons[i] = b;
     }
     return bar;
 }
@@ -2217,12 +2241,7 @@ static bool group_has_genre(const Group *group, const char *genre)
 /* Passt eine Kachel zu den Filtern oben? filter ist kleingeschrieben. */
 static bool tile_matches(const Group *group, const char *filter)
 {
-    Counts c = {0};
-    counts_add_group(&c, group);
-    int status = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.preview_filter));
     int kind = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.preview_kind));
-    if (status == FILTER_MISSING && !c.open) return false;
-    if (status == FILTER_DONE && !c.done) return false;
     if (!(group->source & ui.cfg.sources)) return false;
     if (kind == MD_KIND_FILMS && !group->is_film) return false;
     if (kind == MD_KIND_SERIES && group->is_film) return false;
@@ -2475,6 +2494,7 @@ static gboolean on_preview_done(gpointer data)
         g_ptr_array_free(job->items, TRUE);
         request_all_genres();
         rebuild_library();
+        start_news_load();
     } else {
         set_label_text(ui.preview_note, job->error ? job->error : "Keine Vorschau verfügbar.");
     }
@@ -2576,9 +2596,6 @@ static GtkWidget *build_preview_page(void)
     ui.preview_kind = new_combo(KIND_TEXT, 3, MD_KIND_ALL);
     g_signal_connect(ui.preview_kind, "changed", G_CALLBACK(on_preview_filter_changed), NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.preview_kind, FALSE, FALSE, 0);
-    ui.preview_filter = new_combo(FILTER_TEXT, 3, FILTER_ALL);
-    g_signal_connect(ui.preview_filter, "changed", G_CALLBACK(on_preview_filter_changed), NULL);
-    gtk_box_pack_start(GTK_BOX(bar), ui.preview_filter, FALSE, FALSE, 0);
     ui.preview_language = gtk_combo_box_text_new();
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(ui.preview_language), ALL_LANGUAGES,
                               ALL_LANGUAGES);
@@ -2592,7 +2609,7 @@ static GtkWidget *build_preview_page(void)
     g_signal_connect(refresh, "clicked", G_CALLBACK(on_preview_refresh_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(bar), refresh, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(top), bar, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(top), build_source_bar(FOOTER_PREVIEW), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(top), build_source_bar(), FALSE, FALSE, 0);
     ui.genre_box = gtk_flow_box_new();
     add_css_class(ui.genre_box, "zd-chips");
     gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(ui.genre_box), GTK_SELECTION_NONE);
@@ -2619,6 +2636,167 @@ static GtkWidget *build_preview_page(void)
                         G_CALLBACK(on_more_series_clicked));
     gtk_box_pack_start(GTK_BOX(page), scrolled, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(page), build_footer(FOOTER_PREVIEW), FALSE, FALSE, 0);
+    return page;
+}
+
+/* ---------------------------------------------------------------------------
+ * Seite Neue Folgen
+ * ---------------------------------------------------------------------------
+ * Fragt für jede Serie aus dem Verlauf nach, was seit dem letzten Download gesendet wurde. So
+ * erscheinen auch Serien, die gar nicht in der Vorschau stehen.
+ * ------------------------------------------------------------------------- */
+/* Ist der Titel eine Folge dieser Serie, gesendet seit finished und noch nicht geladen? */
+static bool title_is_news(const MdTitle *t, const char *topic, gint64 finished, const char *dir)
+{
+    gint64 now = g_get_real_time() / G_USEC_PER_SEC;
+    if (t->is_film || t->timestamp <= finished || t->timestamp > now) return false;
+    char *a = g_utf8_strdown(t->topic, -1), *b = g_utf8_strdown(topic, -1);
+    bool same = !strcmp(a, b);
+    g_free(a);
+    g_free(b);
+    return same && md_title_status(t, dir, NULL) == MD_STATUS_MISSING;
+}
+
+static gboolean on_news_done(gpointer data)
+{
+    NewsJob *job = data;
+    if (ui.news_tree.groups) g_ptr_array_free(ui.news_tree.groups, TRUE);
+    ui.news_tree.groups = group_items(job->items);
+    g_ptr_array_set_free_func(job->items, NULL);            /* gehören jetzt den Staffeln */
+    for (guint g = 0; g < ui.news_tree.groups->len; g++) {
+        ((Group *)ui.news_tree.groups->pdata[g])->expanded = true;
+    }
+    int series = (int)ui.news_tree.groups->len;
+    char *title = series ? g_strdup_printf("Neue Folgen (%d)", series) : g_strdup("Neue Folgen");
+    char *note = series ? g_strdup_printf("%d %s mit neuen Folgen seit dem letzten Download",
+                                          series, plural(series, "Serie", "Serien"))
+                        : g_strdup("Alle geladenen Serien sind aktuell.");
+    gtk_container_child_set(GTK_CONTAINER(ui.stack), ui.news_page, "title", title, NULL);
+    set_label_text(ui.news_note, note);
+    g_free(title);
+    g_free(note);
+    ui.news_tree.empty_text = "Keine neuen Folgen.";
+    ui.news_busy = false;
+    gtk_spinner_stop(GTK_SPINNER(ui.news_spinner));
+    gtk_widget_hide(ui.news_spinner);
+    rebuild_tree(&ui.news_tree);
+    g_ptr_array_free(job->items, TRUE);
+    g_strfreev(job->topics);
+    g_free(job->finished);
+    g_free(job->dir);
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer news_thread(gpointer data)
+{
+    NewsJob *job = data;
+    job->items = g_ptr_array_new_with_free_func(item_free);
+    for (int i = 0; job->topics[i]; i++) {
+        MdQuery query = {.text = job->topics[i], .kind = MD_KIND_ALL, .sources = MD_SOURCE_ALL,
+                         .cache = MD_CACHE_USE, .min_minutes = job->min_minutes,
+                         .hide_variants = job->hide_variants};
+        char *error = NULL;
+        GPtrArray *titles = md_search(&query, NULL, NULL, &error);
+        g_free(error);
+        if (!titles) continue;
+        GPtrArray *found = g_ptr_array_new();
+        for (guint n = titles->len; n-- > 0;)
+            if (title_is_news(titles->pdata[n], job->topics[i], job->finished[i], job->dir))
+                g_ptr_array_add(found, g_ptr_array_steal_index(titles, n));
+        g_ptr_array_free(titles, TRUE);
+        add_items(job->items, found, job->dir);
+    }
+    g_idle_add(on_news_done, job);
+    return NULL;
+}
+
+/* Serien aus dem Verlauf mit dem jeweils letzten Download prüfen */
+static void start_news_load(void)
+{
+    if (ui.news_busy) return;
+    ui.news_busy = true;
+    int count = 0;
+    MdHistoryEntry *entries = md_history_snapshot(&count);
+    GHashTable *latest = g_hash_table_new(g_str_hash, g_str_equal);
+    for (int i = 0; i < count; i++) {
+        if (!strcmp(entries[i].topic, "Filme")) continue;
+        gint64 finished = GPOINTER_TO_SIZE(g_hash_table_lookup(latest, entries[i].topic));
+        g_hash_table_insert(latest, entries[i].topic,
+                            GSIZE_TO_POINTER(MAX(finished, entries[i].finished)));
+    }
+    NewsJob *job = g_new0(NewsJob, 1);
+    guint size = g_hash_table_size(latest), n = 0;
+    job->topics = g_new0(char *, size + 1);
+    job->finished = g_new0(gint64, size + 1);
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, latest);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        job->topics[n] = g_strdup(key);
+        job->finished[n++] = GPOINTER_TO_SIZE(value);
+    }
+    g_hash_table_destroy(latest);
+    md_history_snapshot_free(entries, count);
+    job->dir = g_strdup(ui.cfg.dir);
+    job->min_minutes = ui.cfg.min_minutes;
+    job->hide_variants = !ui.cfg.show_signed;
+    ui.news_tree.empty_text = "Wird geprüft …";
+    gtk_widget_show(ui.news_spinner);
+    gtk_spinner_start(GTK_SPINNER(ui.news_spinner));
+    g_thread_unref(g_thread_new("neue-folgen", news_thread, job));
+}
+
+static void on_news_refresh_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    (void)d;
+    start_news_load();
+}
+
+/* Alle neuen Folgen an oder wieder aus */
+static void on_news_select_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    (void)d;
+    Counts c = {0};
+    for (guint g = 0; ui.news_tree.groups && g < ui.news_tree.groups->len; g++)
+        counts_add_group(&c, ui.news_tree.groups->pdata[g]);
+    bool select = c.selected < c.open;
+    for (guint g = 0; ui.news_tree.groups && g < ui.news_tree.groups->len; g++)
+        group_select(ui.news_tree.groups->pdata[g], select);
+    update_checks();
+}
+
+static GtkWidget *build_news_page(void)
+{
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *top = new_column();
+    gtk_widget_set_margin_top(top, 14);
+    gtk_widget_set_margin_bottom(top, 8);
+    GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    ui.news_note = new_label("Wird geprüft …", "zd-sub");
+    add_css_class(ui.news_note, "dim-label");
+    gtk_box_pack_start(GTK_BOX(bar), ui.news_note, TRUE, TRUE, 0);
+    ui.news_spinner = gtk_spinner_new();
+    gtk_box_pack_start(GTK_BOX(bar), ui.news_spinner, FALSE, FALSE, 0);
+    GtkWidget *select = gtk_button_new_with_label("Alle neuen Folgen an/aus");
+    g_signal_connect(select, "clicked", G_CALLBACK(on_news_select_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(bar), select, FALSE, FALSE, 0);
+    GtkWidget *refresh = new_icon_button("view-refresh-symbolic", "Neue Folgen prüfen");
+    g_signal_connect(refresh, "clicked", G_CALLBACK(on_news_refresh_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(bar), refresh, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(top), bar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(page), top, FALSE, FALSE, 0);
+
+    GtkWidget *scrolled, *column = new_page_column(&scrolled);
+    gtk_widget_set_margin_top(column, 4);
+    ui.news_tree.list = add_group(column, NULL);
+    ui.news_tree.limit = RESULT_ROWS_BATCH;
+    g_signal_connect(ui.news_tree.list, "row-activated", G_CALLBACK(on_result_row_activated),
+                     &ui.news_tree);
+    gtk_box_pack_start(GTK_BOX(page), scrolled, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(page), build_footer(FOOTER_NEWS), FALSE, FALSE, 0);
     return page;
 }
 
@@ -2971,13 +3149,12 @@ static void on_forget_clicked(GtkButton *b, gpointer d)
     rebuild_library();
 }
 
-/* "Fehlende Folgen": Serie in der Vorschau zeigen, gefiltert auf das, was fehlt */
+/* Serie in der Vorschau zeigen */
 static void on_find_missing_clicked(GtkButton *b, gpointer d)
 {
     (void)d;
     gtk_entry_set_text(GTK_ENTRY(ui.preview_search), g_object_get_data(G_OBJECT(b), "path"));
     gtk_combo_box_set_active(GTK_COMBO_BOX(ui.preview_kind), MD_KIND_ALL);
-    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.preview_filter), FILTER_MISSING);
     gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "vorschau");
 }
 
@@ -3022,7 +3199,7 @@ static void add_library_topic(const char *topic, int count, int missing, gint64 
     g_free(key);
     if (strcmp(topic, "Filme"))
         gtk_box_pack_start(GTK_BOX(suffix),
-                           new_path_button("edit-find-symbolic", "Fehlende Folgen suchen", topic,
+                           new_path_button("edit-find-symbolic", "In der Vorschau zeigen", topic,
                                            G_CALLBACK(on_find_missing_clicked)), FALSE, FALSE, 0);
     GtkWidget *row = add_row(ui.library_list, topic, subtitle, arrow, suffix, NULL);
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
@@ -3578,6 +3755,8 @@ static void on_activate(GtkApplication *app, gpointer d)
     gtk_stack_set_transition_type(GTK_STACK(ui.stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_set_transition_duration(GTK_STACK(ui.stack), 180);
     gtk_stack_add_titled(GTK_STACK(ui.stack), build_preview_page(), "vorschau", "Vorschau");
+    ui.news_page = build_news_page();
+    gtk_stack_add_titled(GTK_STACK(ui.stack), ui.news_page, "neu", "Neue Folgen");
     ui.downloads_page = build_downloads_page();
     gtk_stack_add_titled(GTK_STACK(ui.stack), ui.downloads_page, "downloads", "Downloads");
     gtk_stack_add_titled(GTK_STACK(ui.stack), build_library_page(), "bibliothek", "Bibliothek");
@@ -3597,6 +3776,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     gtk_widget_hide(ui.infobar);
     gtk_widget_hide(ui.preview_spinner);
     gtk_widget_set_no_show_all(ui.preview_spinner, TRUE);
+    gtk_widget_set_no_show_all(ui.news_spinner, TRUE);
     update_dir_label();
     update_settings_rows();
     rebuild_results();

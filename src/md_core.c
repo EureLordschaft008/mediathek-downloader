@@ -123,7 +123,17 @@ static const struct {
     {MD_SOURCE_ZDF, "zdf", "ZDF", "ZDF"},
     {MD_SOURCE_ARD, "ard", "ARD", "ARD"},
     {MD_SOURCE_3SAT, "3sat", "3Sat", "3sat"},
+    {MD_SOURCE_ZDFNEO, "zdfneo", "ZDFneo", "ZDFneo"},
+    {MD_SOURCE_ONE, "one", "ONE", "ONE"},
+    {MD_SOURCE_WDR, "wdr", "WDR", "WDR"},
+    {MD_SOURCE_SWR, "swr", "SWR", "SWR"},
+    {MD_SOURCE_NDR, "ndr", "NDR", "NDR"},
+    {MD_SOURCE_RBB, "rbb", "RBB", "rbb"},
 };
+
+/* Mediatheken, deren Titel gleich aufgebaut sind */
+#define ZDF_STYLE (MD_SOURCE_ZDF | MD_SOURCE_ZDFNEO)
+#define ARD_STYLE (MD_SOURCE_ARD | MD_SOURCE_ONE)
 
 /* Rubriken, deren Einträge Filme sind (Stöbern ohne Suchbegriff) */
 static const char *const FILM_TOPICS[] = {"Filme", "Spielfilme", "Spielfilm-Highlights",
@@ -513,9 +523,9 @@ static void json_append_escaped(GString *out, const char *text)
 /* Mediathek eines Senders; 0 = keine der unterstützten */
 static int source_of(const char *channel)
 {
-    if (!g_ascii_strncasecmp(channel, "ZDF", 3)) return MD_SOURCE_ZDF;
     for (size_t i = 1; i < G_N_ELEMENTS(SOURCES); i++)
         if (!g_ascii_strcasecmp(channel, SOURCES[i].channel)) return SOURCES[i].source;
+    if (!g_ascii_strncasecmp(channel, "ZDF", 3)) return MD_SOURCE_ZDF;
     return 0;
 }
 
@@ -565,7 +575,7 @@ static void title_analyse(MdTitle *t)
         break;
     }
     g_strstrip(t->name);
-    if (t->source == MD_SOURCE_ARD) {                   /* "… · Praxis mit Meerblick" */
+    if ((t->source & ARD_STYLE)) {                   /* "… · Praxis mit Meerblick" */
         char *short_name = g_regex_replace_literal(show_suffix, t->name, -1, 0, "", 0, NULL);
         g_free(t->name);
         t->name = short_name;
@@ -577,7 +587,7 @@ static void title_analyse(MdTitle *t)
                                    || strstr(topic, "kino"));
     g_free(topic);
     /* Die ARD nennt oft nur "Folge 5": ohne Angabe gilt Staffel 1 */
-    if (t->source != MD_SOURCE_ZDF && t->season < 0 && !t->is_film &&
+    if (!(t->source & ZDF_STYLE) && t->season < 0 && !t->is_film &&
         g_regex_match(numbered, t->name, 0, &match)) {
         char *first = g_match_info_fetch(match, 1), *second = g_match_info_fetch(match, 2);
         t->season = 1;
@@ -592,7 +602,7 @@ static void title_analyse(MdTitle *t)
         g_strchomp(t->name);
     }
     /* "Der Nachtmann (1)": die Nummer steht schon in der Folge */
-    char *number = t->source != MD_SOURCE_ZDF ? strrchr(t->name, '(') : NULL;
+    char *number = !(t->source & ZDF_STYLE) ? strrchr(t->name, '(') : NULL;
     if (number && t->episode >= 0 && g_ascii_isdigit(number[1]) && g_str_has_suffix(t->name, ")")) {
         *number = 0;
         g_strchomp(t->name);
@@ -811,7 +821,7 @@ static bool title_matches(const MdTitle *t, const MdQuery *query)
     if (query->hide_variants && t->is_variant) return false;
     if (query->kind == MD_KIND_FILMS && !t->is_film) return false;
     if (query->kind == MD_KIND_SERIES && (t->is_film ||
-                                          (t->season < 0 && t->source == MD_SOURCE_ZDF)))
+                                          (t->season < 0 && (t->source & ZDF_STYLE))))
         return false;
     return true;
 }
@@ -951,7 +961,7 @@ GPtrArray *md_search(const MdQuery *query, const volatile gint *cancel, bool *tr
         const char *url = md_title_url(t, MD_QUALITY_HIGH);
         if (!title_matches(t, query) || !g_hash_table_add(seen, (char *)url)) continue;
         /* Die ARD führt manche Folge doppelt: mit Staffelangabe und nur mit Nummer */
-        if (t->source != MD_SOURCE_ZDF && t->season >= 0 && !t->track_label &&
+        if (!(t->source & ZDF_STYLE) && t->season >= 0 && !t->track_label &&
             !g_hash_table_add(episodes, variant_key(t)))
             continue;
         raw->pdata[i] = NULL;

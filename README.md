@@ -1,7 +1,7 @@
-# Mediathek Downloader 1.4.2
+# Mediathek Downloader 1.5.0
 
-Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat – einzelne Folgen, ganze Staffeln
-oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
+Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb und 3sat –
+einzelne Folgen, ganze Staffeln oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
 (`mediathek-downloader`, Aufbau und Optik wie beim AV1-Converter) und als Terminal-Version
 (`mediathek-downloader-cli`, z. B. für lange Läufe in tmux).
 
@@ -19,7 +19,7 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.4.2-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.5.0-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
@@ -55,8 +55,10 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
 - **Was ist schon da?** – Jede Folge trägt ihren Stand: *Geladen*, *In Warteschlange*, *Angefangen*
   oder *Datei fehlt*. Serien und Staffeln zeigen „2 von 265 geladen“. Der Filter oben blendet alles
   außer den fehlenden oder den geladenen Titeln aus.
-- **Neue Folgen** – ein kleines grünes „!“ steht an Serien, von denen du schon etwas geladen hast
-  und die seit dem letzten Download neue Folgen bekommen haben.
+- **Neue Folgen** – die gleichnamige Seite listet alle Serien, von denen du schon etwas geladen hast
+  und die seit dem letzten Download neue Folgen bekommen haben, auch wenn sie nicht in der Vorschau
+  stehen. Ein Klick wählt alle aus, „Herunterladen“ startet sie. In Vorschau und Bibliothek markiert
+  ein kleines grünes „!“ dieselben Serien.
 - **Bibliothek** – alles Geladene nach Sendung, mit Größe, Datum, Abspielen und Ordner öffnen. Das
   Lupensymbol zeigt die fehlenden Folgen einer Serie in der Vorschau, sofern sie dort steht.
 - **Sprachen und Untertitel** – Gibt es mehrere Tonspuren oder Untertitel, fragt das Programm vor
@@ -134,7 +136,10 @@ Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt d
   aber nur bei sicherem Titeltreffer. Eine Serie übernimmt die Kategorien ihrer neuesten Folge.
 - **Staffeln bei der ARD:** Nennt ein Titel nur „Folge 5“, zählt er zu Staffel 1. Serien ganz ohne
   Nummern wie der Tatort stehen unter „Einzelne Sendungen“.
-- **Andere Sender:** ARTE und die Dritten sind nicht dabei, nur was unter „ARD“ geführt wird.
+- **Andere Sender:** BR, HR, MDR, ARTE und weitere öffentlich-rechtliche Sender sind nicht dabei.
+- **Private Sender und Bezahldienste** gibt es nicht: Sie stehen nicht in der Datenquelle und
+  liefern ihre Inhalte kopiergeschützt, und das Programm umgeht keinen Kopierschutz.
+- **Titelbilder bei WDR, SWR, NDR und rbb** sind Standbilder aus dem Video, und FSK fehlt dort.
 - **Titellisten** kommen von [MediathekViewWeb](https://mediathekviewweb.de), nicht von den Sendern.
   Ist dieser Dienst nicht erreichbar, gibt es keine Titel.
 - **Freie Suche** gibt es nur in der Terminal-Version. Die Vorschau zeigt die neuesten Titel, was
