@@ -1,4 +1,4 @@
-# ZDF-Downloader 1.0.0
+# ZDF-Downloader 1.1.0
 
 Lädt Filme und Serien aus der ZDF-Mediathek – einzelne Folgen, ganze Staffeln oder eine Serie mit
 allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche (`zdf-downloader`, Aufbau und
@@ -7,8 +7,16 @@ in tmux).
 
 ## Installieren
 
+Über die Paketquelle [VPRepo](https://github.com/EureLordschaft008/VPRepo):
+
 ```bash
-sudo apt install ./zdf-downloader_1.0.0-1_amd64.deb
+sudo apt install zdf-downloader
+```
+
+Oder direkt aus der Paketdatei:
+
+```bash
+sudo apt install ./zdf-downloader_1.1.0-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
@@ -16,6 +24,12 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
 
 ## Was es kann
 
+- **Vorschau** – die Startseite zeigt neue Filme und Serien als Kacheln mit Titelbild. Ein Häkchen
+  merkt einen Film vor, bei einer Serie alle fehlenden Folgen. Ein Klick auf die Kachel öffnet
+  Bild, Beschreibung und alle Staffeln und Folgen zum einzelnen Auswählen. Die Auswahl gilt
+  zusammen mit der Seite Suche; „Herunterladen“ startet alles auf einmal.
+- **IMDb** – der gelbe Knopf an Filmen und Serien öffnet die IMDb-Seite im Browser. Passt kein
+  Treffer sicher, öffnet sich die IMDb-Suche zum Titel. Bewertungen zeigt das Programm nicht selbst.
 - **Suche** – nach Filmen und Serien, wahlweise nur Filme oder nur Serien. Treffer stehen als Baum
   Serie → Staffel → Folge; jede Ebene hat ein Häkchen. Eine Serie oder Staffel wählt nur aus, was
   noch fehlt. Eine schon geladene Folge lässt sich nicht aus Versehen doppelt laden.
@@ -32,6 +46,8 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
 - **AV1** – auf Wunsch wandelt das Programm jedes Video nach dem Download um, mit den Einstellungen
   des AV1-Converters. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei.
 - **Speicherort** – frei wählbar, Standard ist `~/Videos/ZDF Mediathek`.
+- **Zwischenspeicher** – die Titelbilder liegen in einem eigenen, frei wählbaren Ordner, Standard
+  ist `~/.zdf-downloader/bilder`. Halbfertige Downloads (`.part`) bleiben beim Speicherort.
 
 ## Wo die Dateien landen
 
@@ -87,6 +103,8 @@ Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt d
   unter „Einzelne Sendungen“.
 - **Fassungen mit Gebärdensprache** sind eigene Einträge, weil die Einblendung fest im Bild ist.
   Sie sind ausgeblendet und lassen sich in den Einstellungen einschalten.
+- **Titelbilder** kommen von den Seiten des ZDF. Nicht jeder Titel hat eines; dann erscheint ein
+  Platzhalter. Eine Serie zeigt das Bild ihrer neuesten Folge.
 - **Die Suche** läuft über [MediathekViewWeb](https://mediathekviewweb.de), nicht über das ZDF. Ist
   dieser Dienst nicht erreichbar, gibt es keine Treffer.
 

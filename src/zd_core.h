@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define ZD_VERSION "1.0.0"
+#define ZD_VERSION "1.1.0"
 #define ZD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define ZD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define ZD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -119,6 +119,14 @@ void zd_title_free(gpointer title);
 const char *zd_title_url(const ZdTitle *title, ZdQuality quality);
 gint64 zd_title_estimate(const ZdTitle *title, ZdQuality quality);  /* Bytes, geschätzt */
 char *zd_target_path(const ZdTitle *title, const char *dir);        /* Pfad der MP4-Datei */
+
+/* Titelbild der Seite website als Datei holen (blockiert); NULL = keines. Freigeben mit g_free. */
+char *zd_cover_file(const char *website);
+void zd_set_cover_dir(const char *dir);     /* Ordner der Titelbilder; NULL = Standard */
+char *zd_default_cover_dir(void);           /* ~/.zdf-downloader/bilder */
+
+/* Adresse der passenden IMDb-Seite, sonst der IMDb-Suche (blockiert). Freigeben mit g_free. */
+char *zd_imdb_url(const char *name, bool is_film);
 
 /* --- Warteschlange ------------------------------------------------------ */
 /* -> Auftragsnummer; 0 = schon in der Warteschlange */

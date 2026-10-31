@@ -62,6 +62,10 @@
  * ------------------------------------------------------------------------- */
 #define API_URL "https://mediathekviewweb.de/api/query"
 #define USER_AGENT "zdf-downloader/" ZD_VERSION
+#define COVER_PAGE_PREFIX "https://www.zdf.de/"
+#define COVER_URL_PREFIX "https://www.zdf.de/assets/"
+#define COVER_SIZE "384x216"
+#define IMDB_API "https://v3.sg.media-imdb.com/suggestion/x/"
 #define PAGE_SIZE 500               /* Einträge je Anfrage */
 #define SEARCH_MAX 3000             /* mehr Treffer lädt die Suche nicht */
 #define BROWSE_MIN_SECONDS 1200     /* Stöbern ohne Suchbegriff: Mindestlänge für Serien */
@@ -1071,6 +1075,174 @@ ZdStatus zd_title_status(const ZdTitle *t, const char *dir, char **path)
     g_free(result);
     g_free(part);
     return status;
+}
+
+/* ---------------------------------------------------------------------------
+ * Titelbilder
+ * ---------------------------------------------------------------------------
+ * Die Suchdaten enthalten keine Bilder. Die Seite des Titels bei zdf.de nennt eines im
+ * Feld "thumbnailUrl"; es landet einmal geladen im Bilderordner. Eine leere
+ * Datei merkt sich, dass die Seite kein Bild hat. Der Ordner ist einstellbar.
+ * ------------------------------------------------------------------------- */
+static GMutex cover_lock;
+static char *cover_dir;         /* NULL = Standardordner */
+
+/* Adresse des Bildes in der kleinen Größe; NULL = die Seite nennt keines */
+static char *cover_url(const char *page)
+{
+    static const char KEY[] = "\"thumbnailUrl\":\"";
+    const char *start = strstr(page, KEY);
+    if (!start) return NULL;
+    start += strlen(KEY);
+    const char *end = strchr(start, '"');
+    if (!end) return NULL;
+    char *url = g_strndup(start, (gsize)(end - start)), *result = NULL;
+    char *tilde = strrchr(url, '~');
+    if (tilde && g_str_has_prefix(url, COVER_URL_PREFIX) && !strpbrk(url, " \\'")) {
+        const char *query = strchr(tilde, '?');
+        *tilde = 0;
+        result = g_strconcat(url, "~" COVER_SIZE, query ? query : "", NULL);
+    }
+    g_free(url);
+    return result;
+}
+
+/* Bild von der Seite website nach path holen */
+static void cover_download(const char *website, const char *path)
+{
+    char *page_argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT,
+                         (char *)website, NULL};
+    char *reply = NULL, *messages = NULL;
+    int rc = run_capture(page_argv, &reply, &messages);
+    char *url = rc == 0 && reply ? cover_url(reply) : NULL;
+    if (url) {
+        char *tmp = g_strconcat(path, ".part", NULL);
+        char *image_argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, "-o", tmp,
+                              url, NULL};
+        char *image_messages = NULL;
+        if (run_capture(image_argv, NULL, &image_messages) != 0 || g_rename(tmp, path) != 0)
+            g_unlink(tmp);
+        g_free(image_messages);
+        g_free(tmp);
+    } else if (rc == 0) {
+        g_file_set_contents(path, "", 0, NULL);
+    }
+    g_free(url);
+    g_free(reply);
+    g_free(messages);
+}
+
+void zd_set_cover_dir(const char *dir)
+{
+    g_mutex_lock(&cover_lock);
+    g_free(cover_dir);
+    cover_dir = g_strdup(dir);
+    g_mutex_unlock(&cover_lock);
+}
+
+char *zd_default_cover_dir(void)
+{
+    return g_build_filename(zd_app_dir(), "bilder", NULL);
+}
+
+char *zd_cover_file(const char *website)
+{
+    if (!g_str_has_prefix(website, COVER_PAGE_PREFIX)) return NULL;
+    g_mutex_lock(&cover_lock);
+    char *dir = cover_dir ? g_strdup(cover_dir) : zd_default_cover_dir();
+    g_mutex_unlock(&cover_lock);
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, website, -1);
+    char *name = g_strconcat(hash, ".jpg", NULL);
+    char *path = g_build_filename(dir, name, NULL);
+    g_mkdir_with_parents(dir, 0755);
+    if (!g_file_test(path, G_FILE_TEST_EXISTS)) cover_download(website, path);
+    g_free(dir);
+    g_free(hash);
+    g_free(name);
+    if (file_size(path) > 0) return path;
+    g_free(path);
+    return NULL;
+}
+
+/* ---------------------------------------------------------------------------
+ * IMDb
+ * ---------------------------------------------------------------------------
+ * Die Vorschlagsliste von IMDb führt direkt zur Titelseite. Sie ist nur ein Wegweiser: Passt
+ * kein Treffer sicher, öffnet sich die IMDb-Suche, damit nie ein falscher Titel erscheint.
+ * ------------------------------------------------------------------------- */
+/* Wert von "key":" im Bereich start..end */
+static char *json_text_between(const char *start, const char *end, const char *key)
+{
+    const char *value = g_strstr_len(start, end - start, key);
+    if (!value) return NULL;
+    value += strlen(key);
+    const char *close = g_strstr_len(value, end - value, "\"");
+    return close ? g_strndup(value, (gsize)(close - value)) : NULL;
+}
+
+/* Gehört der Treffer label zum Titel name? Ein Titel wie "Wind River - Tod im Schnee" passt zu
+ * "Wind River", aber nur am Anfang und bis zu einem Wortende. */
+static bool imdb_label_fits(const char *label, const char *name)
+{
+    char *a = g_utf8_strdown(label, -1), *b = g_utf8_strdown(name, -1);
+    size_t length = strlen(a);
+    bool fits = length >= 3 && !strncmp(a, b, length) && (!b[length] || strchr(" :-", b[length]));
+    g_free(a);
+    g_free(b);
+    return fits;
+}
+
+/* Titelkennung aus der Vorschlagsliste; NULL = kein sicherer Treffer */
+static char *imdb_pick(const char *reply, const char *name, bool is_film)
+{
+    static const char KEY[] = "\"id\":\"tt";
+    char *result = NULL;
+    for (const char *p = strstr(reply, KEY); p && !result;) {
+        const char *next = strstr(p + 1, KEY);
+        const char *end = next ? next : p + strlen(p);
+        char *id = json_text_between(p, end, "\"id\":\"");
+        char *label = json_text_between(p, end, "\"l\":\"");
+        char *kind = json_text_between(p, end, "\"qid\":\"");
+        bool type_fits = kind && (is_film ? !strcmp(kind, "movie") || !strcmp(kind, "tvMovie")
+                                          : !strcmp(kind, "tvSeries") ||
+                                            !strcmp(kind, "tvMiniSeries"));
+        if (id && label && type_fits && imdb_label_fits(label, name) &&
+            strspn(id, "t0123456789") == strlen(id))
+            result = g_strdup(id);
+        g_free(id);
+        g_free(label);
+        g_free(kind);
+        p = next;
+    }
+    return result;
+}
+
+char *zd_imdb_url(const char *name, bool is_film)
+{
+    /* Untertitel wie "- Tod im Schnee" kennt IMDb meist nicht */
+    char *query = g_strdup(name);
+    char *cut = strstr(query, " - ");
+    if (cut) *cut = 0;
+    if ((cut = strstr(query, ": "))) *cut = 0;
+    char *lower = g_utf8_strdown(query, -1);
+    char *escaped = g_uri_escape_string(lower, NULL, FALSE);
+    char *api = g_strdup_printf(IMDB_API "%s.json?includeVideos=0", escaped);
+    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "15", "-A", USER_AGENT, api, NULL};
+    char *reply = NULL, *messages = NULL, *id = NULL;
+    if (run_capture(argv, &reply, &messages) == 0 && reply) id = imdb_pick(reply, name, is_film);
+    char *full = g_uri_escape_string(name, NULL, FALSE);
+    char *url = id ? g_strdup_printf("https://www.imdb.com/title/%s/", id)
+                   : g_strdup_printf("https://www.imdb.com/find/?q=%s", full);
+    zd_log("IMDb: %s -> %s", name, url);
+    g_free(query);
+    g_free(lower);
+    g_free(escaped);
+    g_free(api);
+    g_free(reply);
+    g_free(messages);
+    g_free(id);
+    g_free(full);
+    return url;
 }
 
 /* ---------------------------------------------------------------------------
