@@ -115,6 +115,11 @@ Schutzmaßnahmen. Kopien zum privaten Gebrauch sind nach § 53 UrhG grundsätzli
 bleiben urheberrechtlich geschützt: nicht weitergeben, nicht veröffentlichen. Das ist keine
 Rechtsberatung.
 
+## Neue Version veröffentlichen
+
+`VERSION` im Makefile und `ZD_VERSION` in `src/zd_core.h` erhöhen, committen und den Tag `v<Version>`
+pushen. GitHub Actions baut dann das Paket, legt das Release an und bringt es nach VPRepo.
+
 ## Aus dem Quelltext bauen
 
 Gebraucht werden `gcc`, `make`, `libgtk-3-dev` und `dpkg-deb`.
