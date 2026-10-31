@@ -175,6 +175,10 @@ Gebraucht werden `gcc`, `make`, `libgtk-3-dev` und `dpkg-deb`.
 make deb
 ```
 
+`make test` führt die Regressionstests und einen kurzen Fuzz-Lauf aus. Die Tests brauchen `curl` und
+legen alles in einem temporären Ordner ab. `make test ASAN=1` nimmt AddressSanitizer dazu. Das geht
+nur, wenn `/etc/ld.so.preload` nichts vorlädt.
+
 | Datei | Aufgabe |
 |---|---|
 | `src/md_core.c` | Engine: Suche, Warteschlange, Download, Umwandlung, Verlauf |
