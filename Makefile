@@ -46,6 +46,7 @@ deb: all
 	rm -rf build/deb
 	$(MAKE) install DESTDIR="$(CURDIR)/build/deb" PREFIX=/usr
 	strip build/deb/usr/bin/mediathek-downloader build/deb/usr/bin/mediathek-downloader-cli
+	install -Dm644 LICENSE build/deb/usr/share/doc/mediathek-downloader/copyright
 	install -d build/deb/DEBIAN
 	sed -e 's/@VERSION@/$(VERSION)-$(DEBREV)/' -e 's/@ARCH@/$(ARCH)/' \
 		-e "s/@SIZE@/$$(du -sk --apparent-size build/deb/usr | cut -f1)/" \
