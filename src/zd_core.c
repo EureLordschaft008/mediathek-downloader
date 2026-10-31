@@ -65,9 +65,13 @@
 #define COVER_PAGE_PREFIX "https://www.zdf.de/"
 #define COVER_URL_PREFIX "https://www.zdf.de/assets/"
 #define COVER_EPG_PREFIX "https://epg-image.zdf.de/"
-#define COVER_NONE_SECONDS (7 * 24 * 3600)  /* Titel ohne Bild so lange nicht neu prüfen */
+#define PAGE_RECHECK_SECONDS (7 * 24 * 3600)    /* Seite ohne Bild/Kategorie neu prüfen */
 #define COVER_SIZE "384x216"
 #define IMDB_API "https://v3.sg.media-imdb.com/suggestion/x/"
+#define IMDB_RATINGS_URL "https://datasets.imdbws.com/title.ratings.tsv.gz"
+#define IMDB_RATINGS_SECONDS (7 * 24 * 3600)
+#define CURL_HTTP_ERROR 22                       /* Exit-Code von curl -f bei 4xx/5xx */
+#define SEARCH_CACHE_SECONDS (6 * 3600)         /* so lange gilt die Liste der Vorschau */
 #define PAGE_SIZE 500               /* Einträge je Anfrage */
 #define SEARCH_MAX 3000             /* mehr Treffer lädt die Suche nicht */
 #define BROWSE_MIN_SECONDS 1200     /* Stöbern ohne Suchbegriff: Mindestlänge für Serien */
@@ -629,9 +633,49 @@ static bool parse_response(const char *text, GPtrArray *out, int *total, char **
     return j.ok;
 }
 
+static GMutex cover_lock;
+static char *cover_dir;         /* NULL = Standardordner */
+
+/* Aktueller Ordner des Zwischenspeichers */
+static char *cache_dir(void)
+{
+    g_mutex_lock(&cover_lock);
+    char *dir = cover_dir ? g_strdup(cover_dir) : zd_default_cover_dir();
+    g_mutex_unlock(&cover_lock);
+    g_mkdir_with_parents(dir, 0755);
+    return dir;
+}
+
+/* Pfad im Zwischenspeicher: Prüfsumme von key plus Endung */
+static char *cache_file(const char *key, const char *suffix)
+{
+    char *dir = cache_dir();
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, key, -1);
+    char *name = g_strconcat(hash, suffix, NULL);
+    char *path = g_build_filename(dir, name, NULL);
+    g_free(dir);
+    g_free(hash);
+    g_free(name);
+    return path;
+}
+
+static char *search_cache_path(const char *body)
+{
+    return cache_file(body, ".suche");
+}
+
+/* Gespeicherte Suchantwort lesen, solange sie frisch ist */
+static bool search_cache_read(const char *path, char **reply)
+{
+    GStatBuf stat_buf;
+    if (g_stat(path, &stat_buf) != 0 || time(NULL) - stat_buf.st_mtime >= SEARCH_CACHE_SECONDS)
+        return false;
+    return g_file_get_contents(path, reply, NULL, NULL);
+}
+
 /* Eine Seite der Suche abrufen */
 static bool fetch_page(const char *text, const char *field, int min_seconds, int offset,
-                       GPtrArray *out, int *total, char **error)
+                       ZdCache cache, GPtrArray *out, int *total, char **error)
 {
     GString *body = g_string_new("{\"queries\":[{\"fields\":[\"channel\"],\"query\":\"zdf\"}");
     if (text && *text) {
@@ -646,7 +690,14 @@ static bool fetch_page(const char *text, const char *field, int min_seconds, int
     char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, "-H",
                     "Content-Type: text/plain", "--data-binary", body->str, API_URL, NULL};
     char *reply = NULL, *messages = NULL;
-    int rc = run_capture(argv, &reply, &messages);
+    /* Antworten für die Vorschau werden aufgehoben, damit der Start ohne Netz auskommt */
+    char *saved = cache != ZD_CACHE_OFF ? search_cache_path(body->str) : NULL;
+    int rc = 0;
+    if (cache != ZD_CACHE_USE || !search_cache_read(saved, &reply)) {
+        rc = run_capture(argv, &reply, &messages);
+        if (saved && rc == 0 && reply) g_file_set_contents(saved, reply, -1, NULL);
+    }
+    g_free(saved);
     bool ok = false;
     if (rc == 0 && reply) {
         ok = parse_response(reply, out, total, error);
@@ -661,14 +712,14 @@ static bool fetch_page(const char *text, const char *field, int min_seconds, int
 }
 
 /* Alle Seiten einer Anfrage abrufen, begrenzt auf SEARCH_MAX */
-static bool fetch_all(const char *text, const char *field, int min_seconds, GPtrArray *out,
-                      const volatile gint *cancel, bool *truncated, char **error)
+static bool fetch_all(const char *text, const char *field, int min_seconds, ZdCache cache,
+                      GPtrArray *out, const volatile gint *cancel, bool *truncated, char **error)
 {
     int total = 0;
     for (int offset = 0; offset < SEARCH_MAX; offset += PAGE_SIZE) {
         if (cancel && g_atomic_int_get(cancel)) return true;
         guint before = out->len;
-        if (!fetch_page(text, field, min_seconds, offset, out, &total, error)) return false;
+        if (!fetch_page(text, field, min_seconds, offset, cache, out, &total, error)) return false;
         if (out->len == before || offset + PAGE_SIZE >= total) return true;
     }
     if (truncated) *truncated = true;
@@ -758,12 +809,13 @@ GPtrArray *zd_search(const ZdQuery *query, const volatile gint *cancel, bool *tr
     if (truncated) *truncated = false;
     if (!*text && query->kind == ZD_KIND_FILMS) {
         for (size_t i = 0; ok && i < G_N_ELEMENTS(FILM_TOPICS); i++)
-            ok = fetch_all(FILM_TOPICS[i], "\"topic\"", min_seconds, raw, cancel, truncated, error);
+            ok = fetch_all(FILM_TOPICS[i], "\"topic\"", min_seconds, query->cache, raw, cancel,
+                           truncated, error);
     } else if (!*text && query->kind == ZD_KIND_SERIES) {
-        ok = fetch_all("", both, MAX(min_seconds, BROWSE_MIN_SECONDS), raw, cancel, truncated,
-                       error);
+        ok = fetch_all("", both, MAX(min_seconds, BROWSE_MIN_SECONDS), query->cache, raw, cancel,
+                       truncated, error);
     } else {
-        ok = fetch_all(text, both, min_seconds, raw, cancel, truncated, error);
+        ok = fetch_all(text, both, min_seconds, query->cache, raw, cancel, truncated, error);
     }
     if (!ok) {
         g_ptr_array_free(raw, TRUE);
@@ -1080,16 +1132,13 @@ ZdStatus zd_title_status(const ZdTitle *t, const char *dir, char **path)
 }
 
 /* ---------------------------------------------------------------------------
- * Titelbilder
+ * Titelbilder und Kategorien
  * ---------------------------------------------------------------------------
- * Die Suchdaten enthalten keine Bilder. Die Seite des Titels bei zdf.de nennt eines im
- * Feld "thumbnailUrl"; es landet einmal geladen im Bilderordner. Die Größe steht je nach
- * Server in der Adresse (~1280x720) oder im Parameter (layout=1280x720). Eine Datei ".leer"
- * merkt sich für eine Weile, dass die Seite kein Bild hat. Der Ordner ist einstellbar.
+ * Die Suchdaten enthalten beides nicht, die Seite des Titels bei zdf.de schon: das Bild im
+ * Feld "thumbnailUrl", die Kategorien im Block "meta-data-tags". Beides landet einmal geladen
+ * im einstellbaren Bilderordner. Die Bildgröße steht je nach Server in der Adresse
+ * (~1280x720) oder im Parameter (layout=1280x720).
  * ------------------------------------------------------------------------- */
-static GMutex cover_lock;
-static char *cover_dir;         /* NULL = Standardordner */
-
 /* Adresse des Bildes in der kleinen Größe; NULL = die Seite nennt keines */
 static char *cover_url(const char *page)
 {
@@ -1116,36 +1165,117 @@ static char *cover_url(const char *page)
     return result;
 }
 
-/* Bild von der Seite website nach path holen; hat die Seite keines, none anlegen */
-static void cover_download(const char *website, const char *path, const char *none)
+/* Keine Kategorie, sondern Fassung, Altersfreigabe oder Sendereihe? */
+static bool genre_tag(const char *href, const char *label)
 {
-    char *page_argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT,
-                         (char *)website, NULL};
-    char *reply = NULL, *messages = NULL;
-    int rc = run_capture(page_argv, &reply, &messages);
-    char *url = rc == 0 && reply ? cover_url(reply) : NULL;
-    if (url) {
-        char *tmp = g_strconcat(path, ".part", NULL);
-        char *image_argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, "-o", tmp,
-                              url, NULL};
-        char *image_messages = NULL;
-        if (run_capture(image_argv, NULL, &image_messages) != 0 || g_rename(tmp, path) != 0)
-            g_unlink(tmp);
-        g_free(image_messages);
-        g_free(tmp);
-    } else if (rc == 0) {
-        g_file_set_contents(none, "", 0, NULL);
-    }
-    g_free(url);
-    g_free(reply);
-    g_free(messages);
+    static const char *const SKIP[] = {"/filme", "/serien", "/untertitel", "/audiodeskription",
+                                       "/deutsche-gebaerdensprache", "/livestream",
+                                       "/altersfreigabe"};
+    for (size_t i = 0; i < G_N_ELEMENTS(SKIP); i++)
+        if (g_str_has_prefix(href, SKIP[i])) return false;
+    if (*href != '/' || strchr(href + 1, '/') || !*label || strlen(label) > 40) return false;
+    /* "/herzkino-196" ist eine Reihe, "/genre-10281" eine Kategorie */
+    const char *dash = strrchr(href, '-');
+    if (dash && g_ascii_isdigit(dash[1]) && !g_str_has_prefix(href, "/genre-")) return false;
+    /* kleingeschrieben sind die Stimmungswörter wie "amüsant" */
+    return g_utf8_validate(label, -1, NULL) && g_unichar_isupper(g_utf8_get_char(label)) &&
+           !strpbrk(label, "\n<&");
 }
 
-/* Wurde vor kurzem festgestellt, dass es kein Bild gibt? */
-static bool cover_known_missing(const char *none)
+/* Altersfreigabe und Kategorien der Seite: FSK in die erste Zeile, Kategorien dahinter */
+static void page_genres(const char *page, GString *out)
 {
-    GStatBuf info;
-    return g_stat(none, &info) == 0 && time(NULL) - info.st_mtime < COVER_NONE_SECONDS;
+    GString *genres = g_string_new(NULL), *fsk = g_string_new(NULL);
+    const char *start = strstr(page, "data-testid=\"meta-data-tags\"");
+    const char *end = start ? strstr(start, "</div>") : NULL;
+    for (const char *p = start; end && (p = g_strstr_len(p, end - p, "href=\"")); ) {
+        p += strlen("href=\"");
+        const char *quote = strchr(p, '"'), *text = strchr(p, '>');
+        const char *close = text ? g_strstr_len(text, end - text, "</a>") : NULL;
+        if (!quote || !close) break;
+        char *href = g_strndup(p, (gsize)(quote - p));
+        char *label = g_strndup(text + 1, (gsize)(close - text - 1));
+        if (g_str_has_prefix(href, "/altersfreigabe") && g_str_has_prefix(label, "FSK") &&
+            !strpbrk(label, "\n<")) {
+            g_string_assign(fsk, label);
+        } else if (genre_tag(href, label)) {
+            g_string_append_printf(genres, "%s\n", label);
+        }
+        g_free(href);
+        g_free(label);
+    }
+    g_string_append_printf(out, "%s\n%s", fsk->str, genres->str);
+    g_string_free(genres, TRUE);
+    g_string_free(fsk, TRUE);
+}
+
+/* Fehlt dem Merkzettel etwas, das die Seite inzwischen haben könnte? */
+static bool page_info_stale(const char *info, const char *path)
+{
+    char **lines = g_strsplit(info, "\n", 3);
+    bool complete = g_strv_length(lines) == 3 && *lines[0] && *lines[2];
+    g_strfreev(lines);
+    GStatBuf stat_buf;
+    if (complete) return false;
+    return g_stat(path, &stat_buf) != 0 ||
+           time(NULL) - stat_buf.st_mtime >= PAGE_RECHECK_SECONDS;
+}
+
+/* Merkzettel zur Seite website: Bildadresse, FSK, danach je Zeile eine Kategorie.
+ * Einmal geholt bleibt er liegen. NULL = Seite nicht erreichbar. */
+static char *page_info(const char *website)
+{
+    if (!g_str_has_prefix(website, COVER_PAGE_PREFIX)) return NULL;
+    char *path = cache_file(website, ".info"), *info = NULL;
+    if (g_file_get_contents(path, &info, NULL, NULL) && !page_info_stale(info, path)) {
+        g_free(path);
+        return info;
+    }
+    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, (char *)website, NULL};
+    char *reply = NULL, *messages = NULL;
+    int rc = run_capture(argv, &reply, &messages);
+    if (rc == CURL_HTTP_ERROR) {        /* Seite ist weg: nicht bei jedem Start fragen */
+        g_file_set_contents(path, "\n\n", -1, NULL);
+    } else if (rc == 0 && reply) {
+        char *url = cover_url(reply);
+        GString *fresh = g_string_new(url ? url : "");
+        g_string_append_c(fresh, '\n');
+        page_genres(reply, fresh);
+        g_file_set_contents(path, fresh->str, (gssize)fresh->len, NULL);
+        g_free(info);
+        info = g_string_free(fresh, FALSE);
+        g_free(url);
+    }
+    g_free(reply);
+    g_free(messages);
+    g_free(path);
+    return info;
+}
+
+ZdPageInfo *zd_page_info(const char *website)
+{
+    char *info = page_info(website);
+    if (!info) return NULL;
+    char **lines = g_strsplit(info, "\n", -1);
+    ZdPageInfo *result = g_new0(ZdPageInfo, 1);
+    GPtrArray *genres = g_ptr_array_new();
+    for (int i = 0; lines[i]; i++) {
+        if (i == 1 && *lines[i]) result->fsk = g_strdup(lines[i]);
+        if (i >= 2 && *lines[i]) g_ptr_array_add(genres, g_strdup(lines[i]));
+    }
+    g_ptr_array_add(genres, NULL);
+    result->genres = (char **)g_ptr_array_free(genres, FALSE);
+    g_strfreev(lines);
+    g_free(info);
+    return result;
+}
+
+void zd_page_info_free(ZdPageInfo *info)
+{
+    if (!info) return;
+    g_free(info->fsk);
+    g_strfreev(info->genres);
+    g_free(info);
 }
 
 void zd_set_cover_dir(const char *dir)
@@ -1163,20 +1293,22 @@ char *zd_default_cover_dir(void)
 
 char *zd_cover_file(const char *website)
 {
-    if (!g_str_has_prefix(website, COVER_PAGE_PREFIX)) return NULL;
-    g_mutex_lock(&cover_lock);
-    char *dir = cover_dir ? g_strdup(cover_dir) : zd_default_cover_dir();
-    g_mutex_unlock(&cover_lock);
-    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, website, -1);
-    char *name = g_strconcat(hash, ".jpg", NULL);
-    char *path = g_build_filename(dir, name, NULL);
-    char *none = g_strconcat(path, ".leer", NULL);
-    g_mkdir_with_parents(dir, 0755);
-    if (file_size(path) <= 0 && !cover_known_missing(none)) cover_download(website, path, none);
-    g_free(none);
-    g_free(dir);
-    g_free(hash);
-    g_free(name);
+    char *info = page_info(website);
+    if (!info || *info == '\n') {
+        g_free(info);
+        return NULL;
+    }
+    char *path = cache_file(website, ".jpg");
+    if (file_size(path) <= 0) {
+        *strchr(info, '\n') = 0;
+        char *tmp = g_strconcat(path, ".part", NULL), *messages = NULL;
+        char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, "-o", tmp, info,
+                        NULL};
+        if (run_capture(argv, NULL, &messages) != 0 || g_rename(tmp, path) != 0) g_unlink(tmp);
+        g_free(messages);
+        g_free(tmp);
+    }
+    g_free(info);
     if (file_size(path) > 0) return path;
     g_free(path);
     return NULL;
@@ -1187,6 +1319,8 @@ char *zd_cover_file(const char *website)
  * ---------------------------------------------------------------------------
  * Die Vorschlagsliste von IMDb führt direkt zur Titelseite. Sie ist nur ein Wegweiser: Passt
  * kein Treffer sicher, öffnet sich die IMDb-Suche, damit nie ein falscher Titel erscheint.
+ * Bewertungen stehen in der offiziellen Datendatei von IMDb, die wöchentlich neu geladen
+ * und dann lokal durchsucht wird; die Titelseiten selbst weisen Programme ab.
  * ------------------------------------------------------------------------- */
 /* Wert von "key":" im Bereich start..end */
 static char *json_text_between(const char *start, const char *end, const char *key)
@@ -1210,8 +1344,8 @@ static bool imdb_label_fits(const char *label, const char *name)
     return fits;
 }
 
-/* Titelkennung aus der Vorschlagsliste; NULL = kein sicherer Treffer */
-static char *imdb_pick(const char *reply, const char *name, bool is_film)
+/* Titelkennung aus der Vorschlagsliste; NULL = kein sicherer Treffer. year darf NULL sein. */
+static char *imdb_pick(const char *reply, const char *name, bool is_film, int *year)
 {
     static const char KEY[] = "\"id\":\"tt";
     char *result = NULL;
@@ -1225,8 +1359,11 @@ static char *imdb_pick(const char *reply, const char *name, bool is_film)
                                           : !strcmp(kind, "tvSeries") ||
                                             !strcmp(kind, "tvMiniSeries"));
         if (id && label && type_fits && imdb_label_fits(label, name) &&
-            strspn(id, "t0123456789") == strlen(id))
+            strspn(id, "t0123456789") == strlen(id)) {
             result = g_strdup(id);
+            const char *y = g_strstr_len(p, end - p, "\"y\":");
+            if (y && year) *year = atoi(y + strlen("\"y\":"));
+        }
         g_free(id);
         g_free(label);
         g_free(kind);
@@ -1235,8 +1372,39 @@ static char *imdb_pick(const char *reply, const char *name, bool is_film)
     return result;
 }
 
-char *zd_imdb_url(const char *name, bool is_film)
+/* Gespeicherte Zuordnung lesen: "tt5362988 2017", "-" = kein Treffer. true = gültig */
+static bool imdb_cache_read(const char *path, char **id, int *year)
 {
+    GStatBuf stat_buf;
+    char *text = NULL;
+    if (g_stat(path, &stat_buf) != 0 || !g_file_get_contents(path, &text, NULL, NULL))
+        return false;
+    bool found = g_str_has_prefix(text, "tt");
+    if (!found && time(NULL) - stat_buf.st_mtime >= PAGE_RECHECK_SECONDS) {
+        g_free(text);
+        return false;
+    }
+    if (found) {
+        char *space = strchr(text, ' ');
+        if (space && year) *year = atoi(space + 1);
+        if (space) *space = 0;
+        *id = g_strdup(text);
+    }
+    g_free(text);
+    return true;
+}
+
+/* Titel bei IMDb nachschlagen -> Kennung wie "tt5362988", NULL = kein sicherer Treffer */
+static char *imdb_lookup(const char *name, bool is_film, int *year)
+{
+    char *key = g_strconcat(is_film ? "film:" : "serie:", name, NULL);
+    char *saved = cache_file(key, ".imdb");
+    g_free(key);
+    char *known = NULL;
+    if (imdb_cache_read(saved, &known, year)) {
+        g_free(saved);
+        return known;
+    }
     /* Untertitel wie "- Tod im Schnee" kennt IMDb meist nicht */
     char *query = g_strdup(name);
     char *cut = strstr(query, " - ");
@@ -1247,20 +1415,91 @@ char *zd_imdb_url(const char *name, bool is_film)
     char *api = g_strdup_printf(IMDB_API "%s.json?includeVideos=0", escaped);
     char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "15", "-A", USER_AGENT, api, NULL};
     char *reply = NULL, *messages = NULL, *id = NULL;
-    if (run_capture(argv, &reply, &messages) == 0 && reply) id = imdb_pick(reply, name, is_film);
-    char *full = g_uri_escape_string(name, NULL, FALSE);
-    char *url = id ? g_strdup_printf("https://www.imdb.com/title/%s/", id)
-                   : g_strdup_printf("https://www.imdb.com/find/?q=%s", full);
-    zd_log("IMDb: %s -> %s", name, url);
+    if (run_capture(argv, &reply, &messages) == 0 && reply) {
+        id = imdb_pick(reply, name, is_film, year);
+        char *line = id ? g_strdup_printf("%s %d", id, year ? *year : 0) : g_strdup("-");
+        g_file_set_contents(saved, line, -1, NULL);
+        g_free(line);
+    }
+    g_free(saved);
     g_free(query);
     g_free(lower);
     g_free(escaped);
     g_free(api);
     g_free(reply);
     g_free(messages);
+    return id;
+}
+
+char *zd_imdb_url(const char *name, bool is_film)
+{
+    char *id = imdb_lookup(name, is_film, NULL);
+    char *full = g_uri_escape_string(name, NULL, FALSE);
+    char *url = id ? g_strdup_printf("https://www.imdb.com/title/%s/", id)
+                   : g_strdup_printf("https://www.imdb.com/find/?q=%s", full);
+    zd_log("IMDb: %s -> %s", name, url);
     g_free(id);
     g_free(full);
     return url;
+}
+
+/* Datendatei der Bewertungen laden, wenn sie fehlt oder alt ist -> Pfad */
+static char *imdb_ratings_file(void)
+{
+    static GMutex lock;
+    char *dir = cache_dir();
+    char *path = g_build_filename(dir, "imdb-bewertungen.tsv", NULL);
+    char *packed = g_strconcat(path, ".part.gz", NULL), *plain = g_strconcat(path, ".part", NULL);
+    GStatBuf stat_buf;
+    g_mutex_lock(&lock);
+    if (g_stat(path, &stat_buf) != 0 || time(NULL) - stat_buf.st_mtime >= IMDB_RATINGS_SECONDS) {
+        char *fetch[] = {"curl", "-sS", "-f", "-L", "-m", "120", "-A", USER_AGENT, "-o", packed,
+                         IMDB_RATINGS_URL, NULL};
+        char *unpack[] = {"gzip", "-df", packed, NULL};
+        char *messages = NULL, *more = NULL;
+        if (run_capture(fetch, NULL, &messages) == 0 && run_capture(unpack, NULL, &more) == 0)
+            g_rename(plain, path);
+        else zd_log("IMDb-Bewertungen nicht geladen");
+        g_unlink(packed);
+        g_unlink(plain);
+        g_free(messages);
+        g_free(more);
+    }
+    g_mutex_unlock(&lock);
+    g_free(dir);
+    g_free(packed);
+    g_free(plain);
+    return path;
+}
+
+/* Zeile "tt5362988<Tab>7.7<Tab>322319" suchen */
+static void imdb_read_rating(const char *id, ZdImdbInfo *info)
+{
+    char *path = imdb_ratings_file();
+    GMappedFile *file = g_mapped_file_new(path, FALSE, NULL);
+    g_free(path);
+    if (!file) return;
+    const char *text = g_mapped_file_get_contents(file);
+    gsize length = g_mapped_file_get_length(file);
+    char *key = g_strdup_printf("\n%s\t", id);
+    const char *line = text ? g_strstr_len(text, (gssize)length, key) : NULL;
+    if (line && line + strlen(key) + 16 < text + length) {
+        char *end = NULL;
+        info->rating = g_ascii_strtod(line + strlen(key), &end);
+        if (end && *end == '\t') info->votes = atoi(end + 1);
+    }
+    g_free(key);
+    g_mapped_file_unref(file);
+}
+
+bool zd_imdb_info(const char *name, bool is_film, ZdImdbInfo *info)
+{
+    memset(info, 0, sizeof(*info));
+    char *id = imdb_lookup(name, is_film, &info->year);
+    if (!id) return false;
+    imdb_read_rating(id, info);
+    g_free(id);
+    return true;
 }
 
 /* ---------------------------------------------------------------------------

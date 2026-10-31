@@ -1,4 +1,4 @@
-# ZDF-Downloader 1.1.1
+# ZDF-Downloader 1.2.0
 
 Lädt Filme und Serien aus der ZDF-Mediathek – einzelne Folgen, ganze Staffeln oder eine Serie mit
 allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche (`zdf-downloader`, Aufbau und
@@ -16,7 +16,7 @@ sudo apt install zdf-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./zdf-downloader_1.1.1-1_amd64.deb
+sudo apt install ./zdf-downloader_1.2.0-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
@@ -28,8 +28,17 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
   merkt einen Film vor, bei einer Serie alle fehlenden Folgen. Ein Klick auf die Kachel öffnet
   Bild, Beschreibung und alle Staffeln und Folgen zum einzelnen Auswählen. Die Auswahl gilt
   zusammen mit der Seite Suche; „Herunterladen“ startet alles auf einmal.
+- **Kategorien** – Knöpfe über den Kacheln filtern nach den Genres des ZDF wie Komödie, Drama,
+  Krimi oder Thriller, dazu die Wahl zwischen Filmen und Serien. Beim ersten Start sammelt das
+  Programm die Kategorien aller Titel im Hintergrund, das dauert einige Minuten. Danach kommen sie
+  aus dem Zwischenspeicher, nur neue Titel werden nachgeholt.
+- **Details beim Überfahren** – ruht die Maus kurz auf einer Kachel, zeigt ein Popup Altersfreigabe,
+  Länge, Datum, Kategorien, IMDb-Bewertung und Beschreibung. Dieselben Angaben stehen in der
+  Detailansicht.
 - **IMDb** – der gelbe Knopf an Filmen und Serien öffnet die IMDb-Seite im Browser. Passt kein
-  Treffer sicher, öffnet sich die IMDb-Suche zum Titel. Bewertungen zeigt das Programm nicht selbst.
+  Treffer sicher, öffnet sich die IMDb-Suche zum Titel, und es erscheint keine Bewertung. So zeigt
+  das Programm nie die Bewertung eines falschen Titels. Das trifft vor allem deutsche Titel, die bei
+  IMDb anders heißen.
 - **Suche** – nach Filmen und Serien, wahlweise nur Filme oder nur Serien. Treffer stehen als Baum
   Serie → Staffel → Folge; jede Ebene hat ein Häkchen. Eine Serie oder Staffel wählt nur aus, was
   noch fehlt. Eine schon geladene Folge lässt sich nicht aus Versehen doppelt laden.
@@ -46,8 +55,10 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
 - **AV1** – auf Wunsch wandelt das Programm jedes Video nach dem Download um, mit den Einstellungen
   des AV1-Converters. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei.
 - **Speicherort** – frei wählbar, Standard ist `~/Videos/ZDF Mediathek`.
-- **Zwischenspeicher** – die Titelbilder liegen in einem eigenen, frei wählbaren Ordner, Standard
-  ist `~/.zdf-downloader/bilder`. Halbfertige Downloads (`.part`) bleiben beim Speicherort.
+- **Zwischenspeicher** – Titelbilder, Kategorien, FSK und IMDb-Zuordnung bleiben dauerhaft liegen
+  und werden nicht neu geladen. Die Film- und Folgenlisten der Vorschau gelten sechs Stunden; der
+  Knopf „Vorschau neu laden“ holt sie sofort frisch. Der Ordner ist frei wählbar, Standard ist
+  `~/.zdf-downloader/bilder`. Halbfertige Downloads (`.part`) bleiben beim Speicherort.
 
 ## Wo die Dateien landen
 
@@ -105,10 +116,17 @@ Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt d
   Sie sind ausgeblendet und lassen sich in den Einstellungen einschalten.
 - **Titelbilder** kommen von den Seiten des ZDF. Nicht jeder Titel hat eines; dann erscheint ein
   Platzhalter. Eine Serie zeigt das Bild ihrer neuesten Folge.
+- **Kategorien** stammen von den Seiten des ZDF. Eine Serie übernimmt die Kategorien ihrer neuesten
+  Folge. Ein Titel ohne Angabe erscheint nur unter „Alle“.
 - **Die Suche** läuft über [MediathekViewWeb](https://mediathekviewweb.de), nicht über das ZDF. Ist
   dieser Dienst nicht erreichbar, gibt es keine Treffer.
 
 ## Rechtliches
+
+Information courtesy of IMDb (https://www.imdb.com). Used with permission. Die Bewertungen stammen
+aus der [offiziellen Datendatei](https://developer.imdb.com/non-commercial-datasets/) von IMDb, die
+nur für den privaten, nicht kommerziellen Gebrauch freigegeben ist. Sie wird wöchentlich neu geladen
+und belegt etwa 25 MB im Zwischenspeicher.
 
 Das Programm lädt frei zugängliche Dateien ohne Kopierschutz; es umgeht keine technischen
 Schutzmaßnahmen. Kopien zum privaten Gebrauch sind nach § 53 UrhG grundsätzlich erlaubt. Die Dateien

@@ -40,9 +40,11 @@
 #define TICK_MS 500
 #define PREVIEW_TILES_BATCH 30  /* Kacheln je Abschnitt auf einmal (weitere per Knopf) */
 #define PREVIEW_FILM_MIN_MINUTES 40
-#define COVER_WIDTH 216
-#define COVER_HEIGHT 122
+#define COVER_WIDTH 224
+#define COVER_HEIGHT 126
 #define COVER_THREADS 4
+#define HOVER_DELAY_MS 500     /* so lange ruht die Maus auf der Kachel bis zum Popup */
+#define GENRE_TICKS 4           /* neue Kategorien alle so vielen Timer-Schläge zeigen */
 #define FOOTER_SEARCH 0
 #define FOOTER_PREVIEW 1
 #define FOOTER_COUNT 2
@@ -72,6 +74,8 @@ typedef struct {
     bool expanded;
 } Season;
 
+enum { IMDB_UNKNOWN, IMDB_LOADING, IMDB_FOUND, IMDB_NOT_FOUND };
+
 /* eine Serie, Sendung oder ein einzelner Film */
 typedef struct {
     char *name;
@@ -84,6 +88,10 @@ typedef struct {
     bool complete;              /* alle Folgen da (die Startliste enthält nur neue) */
     bool loading, select_after_load, cover_requested;
     GdkPixbuf *cover;
+    char **genres;              /* Kategorien; NULL = noch nicht bekannt */
+    char *fsk;
+    ZdImdbInfo imdb;
+    int imdb_state;             /* IMDB_UNKNOWN … */
     GtkWidget *tile_image, *tile_check, *tile_sub, *tile_badges;
 } Group;
 
@@ -116,6 +124,7 @@ typedef struct {
 typedef struct {
     int min_minutes;
     bool hide_variants;
+    ZdCache cache;
     char *dir, *error;
     GPtrArray *items;           /* Item* */
 } PreviewJob;
@@ -125,14 +134,24 @@ typedef struct {
     char *key, *topic, *dir, *error;
     int min_minutes;
     bool hide_variants;
+    ZdCache cache;
     GPtrArray *items;           /* Item* */
 } SeriesJob;
 
-/* ein Titelbild im Hintergrund */
+/* Bild und Kategorien eines Titels im Hintergrund */
 typedef struct {
     char *key, *website, *path;
+    bool background;            /* nur Kategorien; sichtbare Kacheln gehen vor */
     GdkPixbuf *pixbuf;
+    ZdPageInfo *info;
 } CoverJob;
+
+/* IMDb-Bewertung im Hintergrund */
+typedef struct {
+    char *key, *name;
+    bool is_film, found;
+    ZdImdbInfo info;
+} RatingJob;
 
 /* Zeile der Warteschlange */
 typedef struct {
@@ -172,16 +191,24 @@ typedef struct {
     bool updating_checks, has_searched;
 
     /* Vorschau */
-    GtkWidget *preview_search, *preview_filter, *preview_spinner, *preview_note;
+    GtkWidget *preview_search, *preview_kind, *preview_filter, *preview_spinner, *preview_note;
+    GtkWidget *genre_box, *genre_all;
+    GHashTable *genre_chips;    /* Kategorie -> GtkToggleButton */
+    char *active_genre;         /* NULL = alle */
+    int genre_pending, genre_tick;
+    bool genres_dirty, updating_chips;
     GtkWidget *film_title, *film_box, *film_more, *series_title, *series_box, *series_more;
     GPtrArray *preview;         /* Group*, neueste zuerst */
     GHashTable *preview_index;  /* Group.key -> Group* */
     GThreadPool *cover_pool;
     int film_limit, series_limit, series_loading;
-    bool preview_busy;
+    bool preview_busy, preview_refreshed;
     ResultTree detail_tree;     /* Liste der offenen Detailansicht */
     Group *detail_group;
-    GtkWidget *detail_note;
+    GtkWidget *detail_note, *detail_rating;
+    GtkWidget *hover_popover, *hover_rating;
+    Group *hover_group;
+    guint hover_timer;
 
     /* Downloads */
     GtkWidget *downloads_page, *hero, *hero_sub, *jobs_list, *jobs_empty;
@@ -201,7 +228,9 @@ static UiState ui;
 
 static void rebuild_results(void);
 static void rebuild_tree(ResultTree *tree);
+static void rebuild_preview(void);
 static void update_tiles(void);
+static void update_genres(void);
 static void rebuild_library(void);
 static void update_selection(void);
 static void start_search(void);
@@ -544,11 +573,14 @@ static const char CSS[] =
     ".zd-badge.err { color: @error_color; background-color: alpha(@error_color, 0.16); }\n"
     "flowboxchild { padding: 6px; border-radius: 10px; }\n"
     "flowboxchild:hover { background-color: alpha(@theme_fg_color, 0.07); }\n"
+    ".zd-chips flowboxchild { padding: 2px; }\n"
+    ".zd-chips flowboxchild:hover { background-color: transparent; }\n"
+    "button.zd-chip { border-radius: 999px; padding: 3px 12px; min-height: 0; }\n"
     ".zd-cover { border-radius: 8px; background-color: @theme_base_color; }\n"
     ".zd-tile-check { padding: 3px 4px; border-radius: 6px;"
     " background-color: rgba(0, 0, 0, 0.6); }\n"
     ".zd-tile-badges .zd-badge { background-color: rgba(0, 0, 0, 0.75); }\n"
-    "button.zd-imdb { min-height: 0; min-width: 0; padding: 1px 7px; border: none;"
+    "button.zd-imdb { min-height: 0; min-width: 0; padding: 0 5px; border: none;"
     " border-radius: 5px; background-image: none; background-color: #f5c518; color: #000000;"
     " font-size: 85%; font-weight: bold; box-shadow: none; }\n"
     "button.zd-imdb:hover { background-color: #ffd93d; }\n"
@@ -680,6 +712,8 @@ static void group_free(gpointer data)
     g_free(group->website);
     g_free(group->description);
     g_free(group->cover_path);
+    g_strfreev(group->genres);
+    g_free(group->fsk);
     g_clear_object(&group->cover);
     g_ptr_array_free(group->seasons, TRUE);
     g_free(group);
@@ -1609,6 +1643,13 @@ static gboolean on_cover_done(gpointer data)
         group->cover_path = g_strdup(job->path);
         set_tile_cover(group);
     }
+    if (group && job->info && !group->genres) {
+        group->genres = g_steal_pointer(&job->info->genres);
+        group->fsk = g_steal_pointer(&job->info->fsk);
+        ui.genres_dirty = true;
+    }
+    if (job->background && --ui.genre_pending == 0) ui.genres_dirty = true;
+    zd_page_info_free(job->info);
     g_clear_object(&job->pixbuf);
     g_free(job->key);
     g_free(job->website);
@@ -1621,7 +1662,8 @@ static void cover_worker(gpointer data, gpointer d)
 {
     (void)d;
     CoverJob *job = data;
-    job->path = zd_cover_file(job->website);
+    job->info = zd_page_info(job->website);
+    if (!job->background) job->path = zd_cover_file(job->website);
     if (job->path)
         job->pixbuf = gdk_pixbuf_new_from_file_at_scale(job->path, COVER_WIDTH, COVER_HEIGHT,
                                                         FALSE, NULL);
@@ -1636,6 +1678,129 @@ static void request_cover(Group *group)
     job->key = g_strdup(group->key);
     job->website = g_strdup(group->website);
     g_thread_pool_push(ui.cover_pool, job, NULL);
+}
+
+/* sichtbare Kacheln zuerst */
+static gint compare_cover_jobs(gconstpointer a, gconstpointer b, gpointer d)
+{
+    (void)d;
+    return (int)((const CoverJob *)a)->background - (int)((const CoverJob *)b)->background;
+}
+
+/* Kategorien aller Titel im Hintergrund ermitteln */
+static void request_all_genres(void)
+{
+    for (guint i = 0; i < ui.preview->len; i++) {
+        const Group *group = ui.preview->pdata[i];
+        if (group->genres || !group->website) continue;
+        CoverJob *job = g_new0(CoverJob, 1);
+        job->key = g_strdup(group->key);
+        job->website = g_strdup(group->website);
+        job->background = true;
+        ui.genre_pending++;
+        g_thread_pool_push(ui.cover_pool, job, NULL);
+    }
+    ui.genres_dirty = true;
+}
+
+/* Eckdaten eines Titels: FSK, Länge, Datum. Serien nennen je Folge eine ungefähre Länge;
+ * alle Folgen sind erst bekannt, wenn die Serie geöffnet oder angehakt wurde. */
+static char *group_meta(const Group *group, bool short_form)
+{
+    Counts c = {0};
+    counts_add_group(&c, group);
+    int seconds = 0, seasons = 0;
+    for (guint i = 0; i < group->seasons->len; i++) {
+        const Season *season = group->seasons->pdata[i];
+        seasons += season->number >= 0;
+        for (guint n = 0; n < season->items->len; n++)
+            seconds += ((Item *)season->items->pdata[n])->title->duration;
+    }
+    GString *s = g_string_new(group->fsk ? group->fsk : "");
+    char *date = format_date(group->newest);
+    if (s->len) g_string_append(s, " · ");
+    if (group->is_film) {
+        g_string_append_printf(s, "%d min · %s", seconds / MAX(c.total, 1) / 60, date);
+    } else if (group->complete && short_form) {
+        g_string_append_printf(s, "%d %s · %s", c.total, plural(c.total, "Folge", "Folgen"), date);
+    } else if (group->complete) {
+        char *total = zd_format_time(seconds);
+        g_string_append_printf(s, "%d %s · %d %s · insgesamt %s · neueste Folge %s", c.total,
+                               plural(c.total, "Folge", "Folgen"), seasons,
+                               plural(seasons, "Staffel", "Staffeln"), total, date);
+        g_free(total);
+    } else {
+        g_string_append_printf(s, "ca. %d min je Folge · %s%s", seconds / MAX(c.total, 1) / 60,
+                               short_form ? "" : "neueste Folge ", date);
+    }
+    g_free(date);
+    return g_string_free(s, FALSE);
+}
+
+/* Bewertung als Text */
+static char *rating_text(const Group *group)
+{
+    if (group->imdb_state == IMDB_LOADING) return g_strdup("IMDb: wird nachgeschlagen …");
+    if (group->imdb_state != IMDB_FOUND) return g_strdup("IMDb: kein sicherer Treffer");
+    GString *s = g_string_new("IMDb: ");
+    if (group->imdb.rating > 0) {
+        char number[16];
+        g_ascii_formatd(number, sizeof number, "%.1f", group->imdb.rating);
+        *strchr(number, '.') = ',';
+        int votes = group->imdb.votes;
+        g_string_append_printf(s, "★ %s von 10 · ", number);
+        if (votes >= 1000000) g_string_append_printf(s, "%d Mio. Stimmen", votes / 1000000);
+        else if (votes >= 1000) g_string_append_printf(s, "%d Tsd. Stimmen", votes / 1000);
+        else g_string_append_printf(s, "%d %s", votes, plural(votes, "Stimme", "Stimmen"));
+    } else {
+        g_string_append(s, "noch keine Bewertung");
+    }
+    if (group->imdb.year) g_string_append_printf(s, " · erschienen %d", group->imdb.year);
+    return g_string_free(s, FALSE);
+}
+
+/* offene Anzeigen der Bewertung auffrischen */
+static void show_rating(const Group *group)
+{
+    char *text = rating_text(group);
+    if (group == ui.hover_group && ui.hover_rating) set_label_text(ui.hover_rating, text);
+    if (group == ui.detail_group && ui.detail_rating) set_label_text(ui.detail_rating, text);
+    g_free(text);
+}
+
+static gboolean on_rating_done(gpointer data)
+{
+    RatingJob *job = data;
+    Group *group = ui.preview_index ? g_hash_table_lookup(ui.preview_index, job->key) : NULL;
+    if (group) {
+        group->imdb = job->info;
+        group->imdb_state = job->found ? IMDB_FOUND : IMDB_NOT_FOUND;
+        show_rating(group);
+    }
+    g_free(job->key);
+    g_free(job->name);
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer rating_thread(gpointer data)
+{
+    RatingJob *job = data;
+    job->found = zd_imdb_info(job->name, job->is_film, &job->info);
+    g_idle_add(on_rating_done, job);
+    return NULL;
+}
+
+/* Bewertung einmal je Titel nachschlagen */
+static void request_rating(Group *group)
+{
+    if (group->imdb_state != IMDB_UNKNOWN) return;
+    group->imdb_state = IMDB_LOADING;
+    RatingJob *job = g_new0(RatingJob, 1);
+    job->key = g_strdup(group->key);
+    job->name = g_strdup(group->name);
+    job->is_film = group->is_film;
+    g_thread_unref(g_thread_new("bewertung", rating_thread, job));
 }
 
 /* Häkchen, Marke und Beschreibung einer Kachel */
@@ -1673,22 +1838,8 @@ static void update_tile(const Group *group)
         gtk_widget_show(badge);
     }
 
-    char *date = format_date(group->newest), *sub;
-    if (group->is_film) {
-        const Season *season = group->seasons->pdata[0];
-        int minutes = ((Item *)season->items->pdata[0])->title->duration / 60;
-        sub = g_strdup_printf("%d min · %s", minutes, date);
-    } else if (group->complete) {
-        int seasons = 0;
-        for (guint i = 0; i < group->seasons->len; i++)
-            seasons += ((Season *)group->seasons->pdata[i])->number >= 0;
-        sub = g_strdup_printf("%d %s · %d %s", c.total, plural(c.total, "Folge", "Folgen"), seasons,
-                              plural(seasons, "Staffel", "Staffeln"));
-    } else {
-        sub = g_strdup_printf("Neu am %s", date);
-    }
+    char *sub = group_meta(group, true);
     set_label_text(group->tile_sub, sub);
-    g_free(date);
     g_free(sub);
 }
 
@@ -1743,7 +1894,7 @@ static gpointer series_thread(gpointer data)
 {
     SeriesJob *job = data;
     ZdQuery query = {.text = job->topic, .kind = ZD_KIND_ALL, .min_minutes = job->min_minutes,
-                     .hide_variants = job->hide_variants};
+                     .hide_variants = job->hide_variants, .cache = job->cache};
     GPtrArray *titles = zd_search(&query, NULL, NULL, &job->error);
     if (titles) {
         /* die Suche findet das Wort auch in fremden Sendungen */
@@ -1768,6 +1919,7 @@ static void load_series(Group *group)
     job->dir = g_strdup(ui.cfg.dir);
     job->min_minutes = ui.cfg.min_minutes;
     job->hide_variants = !ui.cfg.show_signed;
+    job->cache = ui.preview_refreshed ? ZD_CACHE_REFRESH : ZD_CACHE_USE;
     g_thread_unref(g_thread_new("serie", series_thread, job));
 }
 
@@ -1788,9 +1940,95 @@ static void on_tile_toggled(GtkToggleButton *b, gpointer d)
     update_checks();
 }
 
+/* Zeilen mit Eckdaten, Kategorien und Bewertung anlegen */
+static void add_title_facts(GtkWidget *box, Group *group, GtkWidget **rating)
+{
+    char *meta = group_meta(group, false);
+    GtkWidget *label = new_label(meta, "zd-title");
+    set_wrapping(label, 44);
+    gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+    g_free(meta);
+    if (group->genres && *group->genres) {
+        char *genres = g_strjoinv(" · ", group->genres);
+        label = new_label(genres, "zd-sub");
+        add_css_class(label, "dim-label");
+        set_wrapping(label, 44);
+        gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+        g_free(genres);
+    }
+    request_rating(group);
+    char *text = rating_text(group);
+    *rating = new_label(text, "zd-title");
+    gtk_box_pack_start(GTK_BOX(box), *rating, FALSE, FALSE, 0);
+    g_free(text);
+}
+
+/* Popup schließen und eine anstehende Anzeige verwerfen */
+static void close_hover(void)
+{
+    if (ui.hover_timer) g_source_remove(ui.hover_timer);
+    ui.hover_timer = 0;
+    ui.hover_group = NULL;
+    ui.hover_rating = NULL;
+    if (ui.hover_popover) gtk_widget_destroy(ui.hover_popover);
+}
+
+/* Die Maus ruht auf der Kachel: Popup mit den Details zeigen */
+static gboolean on_hover_timeout(gpointer anchor)
+{
+    Group *group = ui.hover_group;
+    ui.hover_timer = 0;
+    ui.hover_popover = gtk_popover_new(anchor);
+    gtk_popover_set_modal(GTK_POPOVER(ui.hover_popover), FALSE);
+    gtk_popover_set_position(GTK_POPOVER(ui.hover_popover), GTK_POS_RIGHT);
+    g_signal_connect(ui.hover_popover, "destroy", G_CALLBACK(gtk_widget_destroyed),
+                     &ui.hover_popover);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_start(box, 12);
+    gtk_widget_set_margin_end(box, 12);
+    gtk_widget_set_margin_top(box, 10);
+    gtk_widget_set_margin_bottom(box, 12);
+    GtkWidget *title = new_label(group->name, "zd-lead");
+    add_css_class(title, "zd-title");
+    set_wrapping(title, 44);
+    gtk_label_set_width_chars(GTK_LABEL(title), 40);
+    gtk_box_pack_start(GTK_BOX(box), title, FALSE, FALSE, 0);
+    add_title_facts(box, group, &ui.hover_rating);
+    if (group->description && *group->description) {
+        GtkWidget *text = new_label(group->description, NULL);
+        set_wrapping(text, 44);
+        gtk_label_set_width_chars(GTK_LABEL(text), 40);
+        gtk_label_set_lines(GTK_LABEL(text), 9);
+        gtk_label_set_ellipsize(GTK_LABEL(text), PANGO_ELLIPSIZE_END);
+        gtk_box_pack_start(GTK_BOX(box), text, FALSE, FALSE, 4);
+    }
+    gtk_container_add(GTK_CONTAINER(ui.hover_popover), box);
+    gtk_widget_show_all(box);
+    gtk_popover_popup(GTK_POPOVER(ui.hover_popover));
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean on_tile_enter(GtkWidget *w, GdkEventCrossing *e, gpointer d)
+{
+    if (e->detail == GDK_NOTIFY_INFERIOR || ui.hover_group == d) return FALSE;
+    close_hover();
+    ui.hover_group = d;
+    ui.hover_timer = g_timeout_add(HOVER_DELAY_MS, on_hover_timeout, w);
+    return FALSE;
+}
+
+static gboolean on_tile_leave(GtkWidget *w, GdkEventCrossing *e, gpointer d)
+{
+    (void)w;
+    (void)d;
+    if (e->detail != GDK_NOTIFY_INFERIOR) close_hover();
+    return FALSE;
+}
+
 /* Detailansicht: Bild, Beschreibung, und die Folgen als Baum mit Häkchen */
 static void open_detail(Group *group)
 {
+    close_hover();
     GtkWidget *d = gtk_dialog_new_with_buttons(group->name, GTK_WINDOW(ui.win),
                                                GTK_DIALOG_MODAL | GTK_DIALOG_USE_HEADER_BAR,
                                                NULL, NULL);
@@ -1822,6 +2060,7 @@ static void open_detail(Group *group)
     gtk_label_set_lines(GTK_LABEL(description), 7);
     gtk_label_set_ellipsize(GTK_LABEL(description), PANGO_ELLIPSIZE_END);
     gtk_box_pack_start(GTK_BOX(info), description, FALSE, FALSE, 0);
+    add_title_facts(info, group, &ui.detail_rating);
     GtkWidget *imdb = new_imdb_button(group->name, group->is_film);
     gtk_widget_set_halign(imdb, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(info), imdb, FALSE, FALSE, 4);
@@ -1858,6 +2097,7 @@ static void open_detail(Group *group)
 
     ui.detail_group = NULL;
     ui.detail_note = NULL;
+    ui.detail_rating = NULL;
     ui.detail_tree.list = NULL;
     g_ptr_array_free(ui.detail_tree.groups, TRUE);
     ui.detail_tree.groups = NULL;
@@ -1900,12 +2140,6 @@ static void add_tile(GtkWidget *box, Group *group)
                                 : "Alle fehlenden Folgen auswählen");
     g_signal_connect(group->tile_check, "toggled", G_CALLBACK(on_tile_toggled), group);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), group->tile_check);
-    GtkWidget *imdb = new_imdb_button(group->name, group->is_film);
-    gtk_widget_set_halign(imdb, GTK_ALIGN_END);
-    gtk_widget_set_valign(imdb, GTK_ALIGN_START);
-    gtk_widget_set_margin_end(imdb, 6);
-    gtk_widget_set_margin_top(imdb, 6);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), imdb);
     group->tile_badges = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     add_css_class(group->tile_badges, "zd-tile-badges");
     gtk_widget_set_halign(group->tile_badges, GTK_ALIGN_END);
@@ -1916,15 +2150,30 @@ static void add_tile(GtkWidget *box, Group *group)
     gtk_box_pack_start(GTK_BOX(tile), overlay, FALSE, FALSE, 0);
     GtkWidget *title = new_label(group->name, "zd-title");
     gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
-    gtk_label_set_max_width_chars(GTK_LABEL(title), 24);
+    gtk_label_set_max_width_chars(GTK_LABEL(title), 10);
+    gtk_widget_set_size_request(title, COVER_WIDTH, -1);
     gtk_box_pack_start(GTK_BOX(tile), title, FALSE, FALSE, 0);
+    GtkWidget *line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_size_request(line, COVER_WIDTH, -1);
     group->tile_sub = new_label("", "zd-sub");
     add_css_class(group->tile_sub, "dim-label");
-    gtk_box_pack_start(GTK_BOX(tile), group->tile_sub, FALSE, FALSE, 0);
-    if (group->description && *group->description)
-        gtk_widget_set_tooltip_text(tile, group->description);
-    gtk_flow_box_insert(GTK_FLOW_BOX(box), tile, -1);
-    g_object_set_data(G_OBJECT(gtk_widget_get_parent(tile)), "group", group);
+    gtk_label_set_ellipsize(GTK_LABEL(group->tile_sub), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(group->tile_sub), 10);
+    gtk_box_pack_start(GTK_BOX(line), group->tile_sub, TRUE, TRUE, 0);
+    GtkWidget *imdb = new_imdb_button(group->name, group->is_film);
+    gtk_widget_set_valign(imdb, GTK_ALIGN_CENTER);
+    gtk_box_pack_end(GTK_BOX(line), imdb, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(tile), line, FALSE, FALSE, 0);
+    /* eigene Ereignisfläche, sonst meldet die Kachel kein Betreten und Verlassen */
+    GtkWidget *hover = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(hover), FALSE);
+    gtk_widget_set_halign(hover, GTK_ALIGN_CENTER);
+    gtk_widget_add_events(hover, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
+    gtk_container_add(GTK_CONTAINER(hover), tile);
+    g_signal_connect(hover, "enter-notify-event", G_CALLBACK(on_tile_enter), group);
+    g_signal_connect(hover, "leave-notify-event", G_CALLBACK(on_tile_leave), group);
+    gtk_flow_box_insert(GTK_FLOW_BOX(box), hover, -1);
+    g_object_set_data(G_OBJECT(gtk_widget_get_parent(hover)), "group", group);
     request_cover(group);
 }
 
@@ -1934,8 +2183,14 @@ static bool tile_matches(const Group *group, const char *filter)
     Counts c = {0};
     counts_add_group(&c, group);
     int status = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.preview_filter));
+    int kind = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.preview_kind));
     if (status == FILTER_MISSING && !c.open) return false;
     if (status == FILTER_DONE && !c.done) return false;
+    if (kind == ZD_KIND_FILMS && !group->is_film) return false;
+    if (kind == ZD_KIND_SERIES && group->is_film) return false;
+    if (ui.active_genre && !(group->genres && g_strv_contains((const char *const *)group->genres,
+                                                              ui.active_genre)))
+        return false;
     char *lower = g_utf8_strdown(group->name, -1);
     bool match = strstr(lower, filter) != NULL;
     g_free(lower);
@@ -1945,6 +2200,7 @@ static bool tile_matches(const Group *group, const char *filter)
 /* Kacheln neu aufbauen */
 static void rebuild_preview(void)
 {
+    close_hover();
     for (guint i = 0; ui.preview && i < ui.preview->len; i++) {
         Group *group = ui.preview->pdata[i];
         group->tile_image = group->tile_check = group->tile_sub = group->tile_badges = NULL;
@@ -1974,9 +2230,117 @@ static void rebuild_preview(void)
     g_free(text);
     gtk_widget_set_visible(ui.film_more, films > ui.film_limit);
     gtk_widget_set_visible(ui.series_more, series > ui.series_limit);
+    int kind = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.preview_kind));
+    gtk_widget_set_visible(ui.film_title, kind != ZD_KIND_SERIES);
+    gtk_widget_set_visible(ui.film_box, kind != ZD_KIND_SERIES);
+    gtk_widget_set_visible(ui.series_title, kind != ZD_KIND_FILMS);
+    gtk_widget_set_visible(ui.series_box, kind != ZD_KIND_FILMS);
     gtk_widget_show_all(ui.film_box);
     gtk_widget_show_all(ui.series_box);
     update_checks();
+}
+
+/* Kategorien zählen -> Name auf Anzahl */
+static GHashTable *count_genres(void)
+{
+    GHashTable *counts = g_hash_table_new(g_str_hash, g_str_equal);
+    for (guint i = 0; ui.preview && i < ui.preview->len; i++) {
+        const Group *group = ui.preview->pdata[i];
+        for (char **g = group->genres; g && *g; g++) {
+            int count = GPOINTER_TO_INT(g_hash_table_lookup(counts, *g));
+            g_hash_table_insert(counts, *g, GINT_TO_POINTER(count + 1));
+        }
+    }
+    return counts;
+}
+
+/* häufigste Kategorie zuerst */
+static gint compare_genre_names(gconstpointer a, gconstpointer b, gpointer d)
+{
+    int x = GPOINTER_TO_INT(g_hash_table_lookup(d, a));
+    int y = GPOINTER_TO_INT(g_hash_table_lookup(d, b));
+    return x != y ? y - x : g_utf8_collate(a, b);
+}
+
+/* Knöpfe zum gewählten Stand bringen */
+static void sync_genre_chips(void)
+{
+    ui.updating_chips = true;
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.genre_all), !ui.active_genre);
+    GHashTableIter iter;
+    gpointer name, chip;
+    g_hash_table_iter_init(&iter, ui.genre_chips);
+    while (g_hash_table_iter_next(&iter, &name, &chip))
+        gtk_toggle_button_set_active(chip, !g_strcmp0(name, ui.active_genre));
+    ui.updating_chips = false;
+}
+
+/* Kategorie gewählt; "Alle" und ein zweiter Klick zeigen wieder alles */
+static void on_genre_toggled(GtkToggleButton *b, gpointer d)
+{
+    if (ui.updating_chips) return;
+    g_free(ui.active_genre);
+    ui.active_genre = gtk_toggle_button_get_active(b) && d ? g_strdup(d) : NULL;
+    sync_genre_chips();
+    ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
+    rebuild_preview();
+}
+
+static void chip_destroy(GtkWidget *child, gpointer d)
+{
+    (void)d;
+    if (gtk_bin_get_child(GTK_BIN(child)) != ui.genre_all) gtk_widget_destroy(child);
+}
+
+/* Knopfleiste: läuft die Ermittlung noch, kommen neue Knöpfe nur hinten dazu, sonst springt
+ * der Knopf unter dem Mauszeiger weg. Am Ende wird nach Häufigkeit sortiert. */
+static void update_genre_chips(void)
+{
+    GHashTable *counts = count_genres();
+    GList *names = g_hash_table_get_keys(counts);
+    names = g_list_sort_with_data(names, compare_genre_names, counts);
+    if (!ui.genre_pending) {
+        g_hash_table_remove_all(ui.genre_chips);
+        gtk_container_foreach(GTK_CONTAINER(ui.genre_box), chip_destroy, NULL);
+    }
+    for (GList *l = names; l; l = l->next) {
+        GtkWidget *chip = g_hash_table_lookup(ui.genre_chips, l->data);
+        if (!chip) {
+            chip = gtk_toggle_button_new();
+            add_css_class(chip, "zd-chip");
+            char *name = g_strdup(l->data);
+            g_object_set_data_full(G_OBJECT(chip), "name", name, g_free);
+            g_signal_connect(chip, "toggled", G_CALLBACK(on_genre_toggled), name);
+            g_hash_table_insert(ui.genre_chips, g_strdup(name), chip);
+            gtk_flow_box_insert(GTK_FLOW_BOX(ui.genre_box), chip, -1);
+            gtk_widget_show_all(gtk_widget_get_parent(chip));
+        }
+        char *text = g_strdup_printf("%s  %d", (char *)l->data,
+                                     GPOINTER_TO_INT(g_hash_table_lookup(counts, l->data)));
+        gtk_button_set_label(GTK_BUTTON(chip), text);
+        g_free(text);
+    }
+    g_list_free(names);
+    g_hash_table_destroy(counts);
+    sync_genre_chips();
+    if (!ui.preview_busy) {
+        char *note = ui.genre_pending
+                     ? g_strdup_printf("Kategorien werden ermittelt, noch %d Titel …",
+                                       ui.genre_pending)
+                     : g_strdup("");
+        set_label_text(ui.preview_note, note);
+        g_free(note);
+    }
+}
+
+/* Timer: neue Kategorien zeigen */
+static void update_genres(void)
+{
+    if (!ui.genres_dirty || (ui.genre_pending && ++ui.genre_tick % GENRE_TICKS)) return;
+    ui.genres_dirty = false;
+    update_genre_chips();
+    if (ui.active_genre) rebuild_preview();
+    else update_checks();
 }
 
 static void on_preview_filter_changed(GtkWidget *w, gpointer d)
@@ -2018,6 +2382,7 @@ static gboolean on_preview_done(gpointer data)
     gtk_spinner_stop(GTK_SPINNER(ui.preview_spinner));
     gtk_widget_hide(ui.preview_spinner);
     if (job->items) {
+        close_hover();
         for (guint i = 0; i < job->items->len; i++)
             ((Item *)job->items->pdata[i])->in_preview = true;
         if (ui.preview_index) g_hash_table_destroy(ui.preview_index);
@@ -2035,6 +2400,7 @@ static gboolean on_preview_done(gpointer data)
         set_label_text(ui.preview_note, "");
         rebuild_preview();
         g_ptr_array_free(job->items, TRUE);
+        request_all_genres();
     } else {
         set_label_text(ui.preview_note, job->error ? job->error : "Keine Vorschau verfügbar.");
     }
@@ -2048,9 +2414,10 @@ static gpointer preview_thread(gpointer data)
 {
     PreviewJob *job = data;
     ZdQuery films = {.text = "", .kind = ZD_KIND_FILMS, .hide_variants = job->hide_variants,
-                     .min_minutes = MAX(job->min_minutes, PREVIEW_FILM_MIN_MINUTES)};
+                     .min_minutes = MAX(job->min_minutes, PREVIEW_FILM_MIN_MINUTES),
+                     .cache = job->cache};
     ZdQuery series = {.text = "", .kind = ZD_KIND_SERIES, .hide_variants = job->hide_variants,
-                      .min_minutes = job->min_minutes};
+                      .min_minutes = job->min_minutes, .cache = job->cache};
     GPtrArray *titles = zd_search(&films, NULL, NULL, &job->error);
     GPtrArray *more = titles ? zd_search(&series, NULL, NULL, &job->error) : NULL;
     if (more) {
@@ -2064,11 +2431,13 @@ static gpointer preview_thread(gpointer data)
     return NULL;
 }
 
-static void start_preview_load(void)
+static void start_preview_load(ZdCache cache)
 {
     if (ui.preview_busy) return;
     ui.preview_busy = true;
+    ui.preview_refreshed = cache == ZD_CACHE_REFRESH;
     PreviewJob *job = g_new0(PreviewJob, 1);
+    job->cache = cache;
     job->dir = g_strdup(ui.cfg.dir);
     job->min_minutes = ui.cfg.min_minutes;
     job->hide_variants = !ui.cfg.show_signed;
@@ -2092,7 +2461,7 @@ static void on_preview_refresh_clicked(GtkButton *b, gpointer d)
     if (!any || ask_confirmation("Vorschau neu laden?",
                                  "Die Auswahl in der Vorschau geht verloren.", "Behalten",
                                  "Neu laden", false))
-        start_preview_load();
+        start_preview_load(ZD_CACHE_REFRESH);
 }
 
 /* ein Abschnitt: Überschrift, Kacheln, "Weitere anzeigen" */
@@ -2129,6 +2498,9 @@ static GtkWidget *build_preview_page(void)
     g_signal_connect(ui.preview_search, "search-changed", G_CALLBACK(on_preview_filter_changed),
                      NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.preview_search, TRUE, TRUE, 0);
+    ui.preview_kind = new_combo(KIND_TEXT, 3, ZD_KIND_ALL);
+    g_signal_connect(ui.preview_kind, "changed", G_CALLBACK(on_preview_filter_changed), NULL);
+    gtk_box_pack_start(GTK_BOX(bar), ui.preview_kind, FALSE, FALSE, 0);
     ui.preview_filter = new_combo(FILTER_TEXT, 3, FILTER_ALL);
     g_signal_connect(ui.preview_filter, "changed", G_CALLBACK(on_preview_filter_changed), NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.preview_filter, FALSE, FALSE, 0);
@@ -2138,6 +2510,18 @@ static GtkWidget *build_preview_page(void)
     g_signal_connect(refresh, "clicked", G_CALLBACK(on_preview_refresh_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(bar), refresh, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(top), bar, FALSE, FALSE, 0);
+    ui.genre_box = gtk_flow_box_new();
+    add_css_class(ui.genre_box, "zd-chips");
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(ui.genre_box), GTK_SELECTION_NONE);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(ui.genre_box), 30);
+    gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(ui.genre_box), 3);
+    gtk_widget_set_margin_top(ui.genre_box, 6);
+    ui.genre_all = gtk_toggle_button_new_with_label("Alle");
+    add_css_class(ui.genre_all, "zd-chip");
+    g_signal_connect(ui.genre_all, "toggled", G_CALLBACK(on_genre_toggled), NULL);
+    gtk_flow_box_insert(GTK_FLOW_BOX(ui.genre_box), ui.genre_all, -1);
+    ui.genre_chips = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    gtk_box_pack_start(GTK_BOX(top), ui.genre_box, FALSE, FALSE, 0);
     ui.preview_note = new_label("", "zd-sub");
     add_css_class(ui.preview_note, "dim-label");
     set_wrapping(ui.preview_note, 90);
@@ -2406,6 +2790,7 @@ static gboolean on_tick(gpointer d)
         rebuild_library();
     }
     g_string_free(mark, TRUE);
+    update_genres();
     return G_SOURCE_CONTINUE;
 }
 
@@ -2804,7 +3189,7 @@ static GtkWidget *build_settings_page(void)
     g_signal_connect(cache, "clicked", G_CALLBACK(on_choose_cache_clicked), NULL);
     GtkWidget *cache_row = add_row(where, "Ordner für Zwischenspeicher", "", NULL, cache,
                                    &ui.cache_sub);
-    gtk_widget_set_tooltip_text(cache_row, "Hier liegen die Titelbilder der Vorschau.");
+    gtk_widget_set_tooltip_text(cache_row, "Hier liegen Titelbilder und Kategorien der Vorschau.");
     quality_combo = new_setting_combo(QUALITY_TEXT, 3, c->quality);
     add_row(where, "Qualität", NULL, NULL, quality_combo, NULL);
 
@@ -2991,6 +3376,8 @@ static void on_action_about(GSimpleAction *a, GVariant *p, gpointer d)
                           "Lädt Filme und Serien aus der ZDF-Mediathek für den privaten Gebrauch "
                           "– mit Pause, Tempolimit, allen Sprachen und Untertiteln und auf Wunsch "
                           "als AV1. Suche über MediathekViewWeb.\n"
+                          "Information courtesy of IMDb (https://www.imdb.com). "
+                          "Used with permission.\n"
                           "Einstellungen, Verlauf und Protokoll: ~/.zdf-downloader",
                           NULL);
 }
@@ -3126,12 +3513,14 @@ static void on_activate(GtkApplication *app, gpointer d)
     rebuild_results();
     rebuild_library();
     show_start_notes();
-    on_tick(NULL);
     g_timeout_add(TICK_MS, on_tick, NULL);
     ui.cover_pool = g_thread_pool_new(cover_worker, NULL, COVER_THREADS, FALSE, NULL);
+    g_thread_pool_set_sort_function(ui.cover_pool, compare_cover_jobs, NULL);
     ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
     rebuild_preview();
-    start_preview_load();
+    sync_genre_chips();
+    on_tick(NULL);
+    start_preview_load(ZD_CACHE_USE);
     g_thread_unref(g_thread_new("gpu", gpu_check_thread, NULL));
     gtk_widget_grab_focus(ui.preview_search);
 }

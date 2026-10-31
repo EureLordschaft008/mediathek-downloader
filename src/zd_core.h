@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define ZD_VERSION "1.1.1"
+#define ZD_VERSION "1.2.0"
 #define ZD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define ZD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define ZD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -41,9 +41,13 @@ typedef struct {
     GPtrArray *subtitles;       /* ZdTrack* */
 } ZdTitle;
 
+/* Antworten der Suche zwischenspeichern? USE liest gespeicherte, REFRESH holt neu und speichert */
+typedef enum { ZD_CACHE_OFF, ZD_CACHE_USE, ZD_CACHE_REFRESH } ZdCache;
+
 typedef struct {
     const char *text;           /* Suchbegriff; leer = neueste Einträge */
     ZdKind kind;
+    ZdCache cache;
     int min_minutes;            /* kürzere Einträge (Trailer, Clips) ausblenden */
     bool hide_variants;         /* Fassungen mit Gebärdensprache ausblenden */
 } ZdQuery;
@@ -81,6 +85,18 @@ typedef struct {
     double progress;            /* 0..1 der aktuellen Phase */
     double remaining;           /* Sekunden der aktuellen Phase, < 0 = unbekannt */
 } ZdJobView;
+
+/* Angaben von der Seite des Titels */
+typedef struct {
+    char *fsk;                  /* "FSK 12", NULL = keine Angabe */
+    char **genres;              /* "Komödie" …, NULL-terminiert */
+} ZdPageInfo;
+
+/* Angaben von IMDb */
+typedef struct {
+    double rating;              /* 0 = keine Bewertung */
+    int votes, year;            /* year: Erscheinungsjahr, 0 = unbekannt */
+} ZdImdbInfo;
 
 /* Stand eines Titels aus Sicht des Nutzers */
 typedef enum {
@@ -122,11 +138,17 @@ char *zd_target_path(const ZdTitle *title, const char *dir);        /* Pfad der 
 
 /* Titelbild der Seite website als Datei holen (blockiert); NULL = keines. Freigeben mit g_free. */
 char *zd_cover_file(const char *website);
+/* Altersfreigabe und Kategorien von der Seite des Titels (blockiert); NULL = nicht erreichbar */
+ZdPageInfo *zd_page_info(const char *website);
+void zd_page_info_free(ZdPageInfo *info);
 void zd_set_cover_dir(const char *dir);     /* Ordner der Titelbilder; NULL = Standard */
 char *zd_default_cover_dir(void);           /* ~/.zdf-downloader/bilder */
 
 /* Adresse der passenden IMDb-Seite, sonst der IMDb-Suche (blockiert). Freigeben mit g_free. */
 char *zd_imdb_url(const char *name, bool is_film);
+/* Bewertung nachschlagen (blockiert, lädt beim ersten Mal die Datendatei von IMDb);
+ * false = kein sicherer Treffer */
+bool zd_imdb_info(const char *name, bool is_film, ZdImdbInfo *info);
 
 /* --- Warteschlange ------------------------------------------------------ */
 /* -> Auftragsnummer; 0 = schon in der Warteschlange */
