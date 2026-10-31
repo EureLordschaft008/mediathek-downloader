@@ -1,0 +1,8 @@
+/zdf-downloader
+/zdf-downloader-cli
+/build/
+*.deb
+*.mp4
+*.mkv
+*.part
+/.claude/

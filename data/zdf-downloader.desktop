@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ZDF-Downloader
+GenericName=Mediathek-Downloader
+Comment=Filme und Serien aus der ZDF-Mediathek laden
+Exec=zdf-downloader
+Icon=zdf-downloader
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=ZDF;Mediathek;Download;Serie;Film;AV1;
+StartupWMClass=zdf-downloader
