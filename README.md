@@ -1,22 +1,25 @@
-# ZDF-Downloader 1.3.0
+# Mediathek Downloader 1.3.0
 
-Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat – einzelne Folgen, ganze Staffeln oder eine Serie mit
-allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche (`zdf-downloader`, Aufbau und
-Optik wie beim AV1-Converter) und als Terminal-Version (`zdf-downloader-cli`, z. B. für lange Läufe
-in tmux).
+Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat – einzelne Folgen, ganze Staffeln
+oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
+(`mediathek-downloader`, Aufbau und Optik wie beim AV1-Converter) und als Terminal-Version
+(`mediathek-downloader-cli`, z. B. für lange Läufe in tmux).
+
+Bis Version 1.2 hieß das Programm ZDF-Downloader. Beim ersten Start zieht es Einstellungen, Verlauf,
+Warteschlange und Zwischenspeicher aus `~/.zdf-downloader` nach `~/.mediathek-downloader` um.
 
 ## Installieren
 
 Über die Paketquelle [VPRepo](https://github.com/EureLordschaft008/VPRepo):
 
 ```bash
-sudo apt install zdf-downloader
+sudo apt install mediathek-downloader
 ```
 
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./zdf-downloader_1.3.0-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.3.0-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
@@ -31,7 +34,7 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
   merkt einen Film vor, bei einer Serie alle fehlenden Folgen. Ein Klick auf die Kachel öffnet
   Bild, Beschreibung und alle Staffeln und Folgen zum einzelnen Auswählen. Die Auswahl gilt
   zusammen mit der Seite Suche; „Herunterladen“ startet alles auf einmal.
-- **Kategorien** – Knöpfe über den Kacheln filtern nach den Genres des ZDF wie Komödie, Drama,
+- **Kategorien** – Knöpfe über den Kacheln filtern nach Genres wie Komödie, Drama,
   Krimi oder Thriller, dazu die Wahl zwischen Filmen und Serien. Beim ersten Start sammelt das
   Programm die Kategorien aller Titel im Hintergrund, das dauert einige Minuten. Danach kommen sie
   aus dem Zwischenspeicher, nur neue Titel werden nachgeholt.
@@ -57,11 +60,11 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
 - **Tempolimit** – gilt für alle Downloads zusammen und sofort, auch mitten im Download.
 - **AV1** – auf Wunsch wandelt das Programm jedes Video nach dem Download um, mit den Einstellungen
   des AV1-Converters. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei.
-- **Speicherort** – frei wählbar, Standard ist `~/Videos/ZDF Mediathek`.
+- **Speicherort** – frei wählbar, Standard ist `~/Videos/Mediathek`.
 - **Zwischenspeicher** – Titelbilder, Kategorien, FSK und IMDb-Zuordnung bleiben dauerhaft liegen
   und werden nicht neu geladen. Die Film- und Folgenlisten der Vorschau gelten sechs Stunden; der
   Knopf „Vorschau neu laden“ holt sie sofort frisch. Der Ordner ist frei wählbar, Standard ist
-  `~/.zdf-downloader/bilder`. Halbfertige Downloads (`.part`) bleiben beim Speicherort.
+  `~/.mediathek-downloader/bilder`. Halbfertige Downloads (`.part`) bleiben beim Speicherort.
 
 ## Wo die Dateien landen
 
@@ -74,20 +77,20 @@ Eine Folge gilt als geladen, sobald sie im Verlauf steht und die Datei noch da i
 Qualität oder an welchem Speicherort. Wird eine Datei verschoben, zeigt das Programm *Datei fehlt*;
 der Eintrag lässt sich in der Bibliothek entfernen, die Folge dann neu laden.
 
-Einstellungen, Warteschlange, Verlauf und Protokoll liegen in `~/.zdf-downloader`.
+Einstellungen, Warteschlange, Verlauf und Protokoll liegen in `~/.mediathek-downloader`.
 
 ## Terminal-Version
 
 ```bash
-zdf-downloader-cli --serien --staffel 26 --nur-fehlende "Löwenzahn"
+mediathek-downloader-cli --serien --staffel 26 --nur-fehlende "Löwenzahn"
 ```
 
 ```bash
-zdf-downloader-cli --serien --staffel 26 --laden alle --ziel ~/Videos/ZDF --limit 10 --av1 gpu "Löwenzahn"
+mediathek-downloader-cli --serien --staffel 26 --laden alle --ziel ~/Videos/Mediathek --limit 10 --av1 gpu "Löwenzahn"
 ```
 
 Ohne `--laden` zeigt das Programm nur die Trefferliste mit dem Stand jedes Titels. Strg+C pausiert;
-derselbe Befehl macht dort weiter. Alle Optionen: `zdf-downloader-cli --help`. Die Warteschlange
+derselbe Befehl macht dort weiter. Alle Optionen: `mediathek-downloader-cli --help`. Die Warteschlange
 der Oberfläche nutzt die Terminal-Version nicht, den Verlauf schon.
 
 ## Qualität und AV1
@@ -117,7 +120,7 @@ Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt d
   unter „Einzelne Sendungen“.
 - **Fassungen mit Gebärdensprache** sind eigene Einträge, weil die Einblendung fest im Bild ist.
   Sie sind ausgeblendet und lassen sich in den Einstellungen einschalten.
-- **Titelbilder** kommen von den Seiten des ZDF. Nicht jeder Titel hat eines; dann erscheint ein
+- **Titelbilder** kommen von den Seiten der Mediatheken. Nicht jeder Titel hat eines; dann erscheint ein
   Platzhalter. Eine Serie zeigt das Bild ihrer neuesten Folge.
 - **Kategorien** stammen beim ZDF von dessen Seiten. ARD und 3sat nennen keine; dort leitet das
   Programm sie aus Stichwörtern in Sendungsname und Beschreibung ab, zum Beispiel Krimi bei „Tatort“.
@@ -126,7 +129,7 @@ Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt d
 - **Staffeln bei der ARD:** Nennt ein Titel nur „Folge 5“, zählt er zu Staffel 1. Serien ganz ohne
   Nummern wie der Tatort stehen unter „Einzelne Sendungen“.
 - **Andere Sender:** ARTE und die Dritten sind nicht dabei, nur was unter „ARD“ geführt wird.
-- **Die Suche** läuft über [MediathekViewWeb](https://mediathekviewweb.de), nicht über das ZDF. Ist
+- **Die Suche** läuft über [MediathekViewWeb](https://mediathekviewweb.de), nicht über die Sender. Ist
   dieser Dienst nicht erreichbar, gibt es keine Treffer.
 
 ## Rechtliches
@@ -143,7 +146,7 @@ Rechtsberatung.
 
 ## Neue Version veröffentlichen
 
-`VERSION` im Makefile und `ZD_VERSION` in `src/zd_core.h` erhöhen, committen und den Tag `v<Version>`
+`VERSION` im Makefile und `MD_VERSION` in `src/md_core.h` erhöhen, committen und den Tag `v<Version>`
 pushen. GitHub Actions baut dann das Paket, legt das Release an und bringt es nach VPRepo.
 
 ## Aus dem Quelltext bauen
@@ -156,7 +159,7 @@ make deb
 
 | Datei | Aufgabe |
 |---|---|
-| `src/zd_core.c` | Engine: Suche, Warteschlange, Download, Umwandlung, Verlauf |
-| `src/zd_gui.c` | grafische Oberfläche (GTK 3) |
-| `src/zd_cli.c` | Terminal-Version |
+| `src/md_core.c` | Engine: Suche, Warteschlange, Download, Umwandlung, Verlauf |
+| `src/md_gui.c` | grafische Oberfläche (GTK 3) |
+| `src/md_cli.c` | Terminal-Version |
 | `data/` | Starter, Symbol, Paketbeschreibung |

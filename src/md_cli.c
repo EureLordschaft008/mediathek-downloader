@@ -1,11 +1,11 @@
 /*
- * ZDF-Downloader – Terminal-Version
- * =================================
- * Sucht in der ZDF-Mediathek und lädt die gewählten Treffer herunter. Gut für lange
+ * Mediathek Downloader – Terminal-Version
+ * =======================================
+ * Sucht in den Mediatheken und lädt die gewählten Treffer herunter. Gut für lange
  * Läufe per SSH oder in einer tmux-Sitzung.
  *
  * Aufruf:
- *     zdf-downloader-cli [Optionen] SUCHBEGRIFF
+ *     mediathek-downloader-cli [Optionen] SUCHBEGRIFF
  *
  * Ohne --laden zeigt das Programm nur die nummerierte Trefferliste. Strg+C pausiert:
  * Die .part-Dateien bleiben, derselbe Befehl macht dort weiter.
@@ -20,10 +20,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "zd_core.h"
+#include "md_core.h"
 
 static const char USAGE[] =
-    "Aufruf: zdf-downloader-cli [Optionen] SUCHBEGRIFF\n"
+    "Aufruf: mediathek-downloader-cli [Optionen] SUCHBEGRIFF\n"
     "\n"
     "  --filme                nur Filme\n"
     "  --serien               nur Serien\n"
@@ -87,10 +87,10 @@ static int parse_sources(const char *text)
     int sources = 0;
     char **parts = g_strsplit(text, ",", -1);
     for (int i = 0; parts[i]; i++) {
-        if (!g_ascii_strcasecmp(parts[i], "zdf")) sources |= ZD_SOURCE_ZDF;
-        else if (!g_ascii_strcasecmp(parts[i], "ard")) sources |= ZD_SOURCE_ARD;
-        else if (!g_ascii_strcasecmp(parts[i], "3sat")) sources |= ZD_SOURCE_3SAT;
-        else if (!g_ascii_strcasecmp(parts[i], "alle")) sources = ZD_SOURCE_ALL;
+        if (!g_ascii_strcasecmp(parts[i], "zdf")) sources |= MD_SOURCE_ZDF;
+        else if (!g_ascii_strcasecmp(parts[i], "ard")) sources |= MD_SOURCE_ARD;
+        else if (!g_ascii_strcasecmp(parts[i], "3sat")) sources |= MD_SOURCE_3SAT;
+        else if (!g_ascii_strcasecmp(parts[i], "alle")) sources = MD_SOURCE_ALL;
         else {
             fprintf(stderr, "Unbekannte Mediathek %s\n", parts[i]);
             exit(2);
@@ -107,15 +107,15 @@ static const char *const STATUS_TEXT[] = {"", "angefangen", "in Warteschlange", 
 static int print_history(void)
 {
     int count = 0;
-    ZdHistoryEntry *entries = zd_history_snapshot(&count);
+    MdHistoryEntry *entries = md_history_snapshot(&count);
     for (int i = 0; i < count; i++) {
-        char *size = zd_format_size((double)entries[i].size);
+        char *size = md_format_size((double)entries[i].size);
         printf("%-12s  %10s  %s\n", entries[i].exists ? "geladen" : "Datei fehlt", size,
                entries[i].title);
         g_free(size);
     }
     printf("%d Einträge\n", count);
-    zd_history_snapshot_free(entries, count);
+    md_history_snapshot_free(entries, count);
     return 0;
 }
 
@@ -123,14 +123,14 @@ static int print_history(void)
 static void append_labels(GString *out, GPtrArray *tracks)
 {
     for (guint i = 0; i < tracks->len; i++)
-        g_string_append_printf(out, "%s%s", i ? "," : "", ((ZdTrack *)tracks->pdata[i])->label);
+        g_string_append_printf(out, "%s%s", i ? "," : "", ((MdTrack *)tracks->pdata[i])->label);
 }
 
 /* Trefferliste ausgeben */
 static void print_titles(GPtrArray *titles, const char *dir)
 {
     for (guint i = 0; i < titles->len; i++) {
-        const ZdTitle *t = titles->pdata[i];
+        const MdTitle *t = titles->pdata[i];
         GString *tracks = g_string_new("");
         if (t->audio->len > 1 || t->subtitles->len) {
             g_string_append(tracks, "  [Ton: ");
@@ -139,8 +139,8 @@ static void print_titles(GPtrArray *titles, const char *dir)
             append_labels(tracks, t->subtitles);
             g_string_append_c(tracks, ']');
         }
-        printf("%4u  %-4s  %-14s  %-24.24s  %3d min  %s%s\n", i + 1, zd_source_label(t->source),
-               STATUS_TEXT[zd_title_status(t, dir, NULL)], t->topic, t->duration / 60, t->title,
+        printf("%4u  %-4s  %-14s  %-24.24s  %3d min  %s%s\n", i + 1, md_source_label(t->source),
+               STATUS_TEXT[md_title_status(t, dir, NULL)], t->topic, t->duration / 60, t->title,
                tracks->str);
         g_string_free(tracks, TRUE);
     }
@@ -151,24 +151,24 @@ static int wait_for_queue(void)
 {
     for (;;) {
         int count = 0, open = 0, failed = 0;
-        ZdJobView *jobs = zd_queue_snapshot(&count);
+        MdJobView *jobs = md_queue_snapshot(&count);
         GString *line = g_string_new(NULL);
         for (int i = 0; i < count; i++) {
-            const ZdJobView *j = &jobs[i];
-            if (j->state == ZD_JOB_FAILED) failed++;
-            if (j->state != ZD_JOB_DONE && j->state != ZD_JOB_FAILED) open++;
-            if (j->state == ZD_JOB_DOWNLOADING) {
-                char *speed = zd_format_size(j->speed);
+            const MdJobView *j = &jobs[i];
+            if (j->state == MD_JOB_FAILED) failed++;
+            if (j->state != MD_JOB_DONE && j->state != MD_JOB_FAILED) open++;
+            if (j->state == MD_JOB_DOWNLOADING) {
+                char *speed = md_format_size(j->speed);
                 g_string_append_printf(line, "  %3.0f %% %s/s", j->progress * 100, speed);
                 g_free(speed);
-            } else if (j->state == ZD_JOB_CONVERTING) {
+            } else if (j->state == MD_JOB_CONVERTING) {
                 g_string_append_printf(line, "  %s %3.0f %%", j->merging ? "Spuren" : "AV1", j->progress * 100);
             }
         }
         printf("\r\033[K%d offen%s", open, line->str);
         fflush(stdout);
         g_string_free(line, TRUE);
-        zd_queue_snapshot_free(jobs, count);
+        md_queue_snapshot_free(jobs, count);
         if (!open || g_stop) {
             printf("\n");
             return failed;
@@ -181,18 +181,18 @@ static int wait_for_queue(void)
 static void print_failures(void)
 {
     int count = 0;
-    ZdJobView *jobs = zd_queue_snapshot(&count);
+    MdJobView *jobs = md_queue_snapshot(&count);
     for (int i = 0; i < count; i++)
-        if (jobs[i].state == ZD_JOB_FAILED)
+        if (jobs[i].state == MD_JOB_FAILED)
             fprintf(stderr, "Fehler: %s: %s\n", jobs[i].title, jobs[i].message);
-    zd_queue_snapshot_free(jobs, count);
+    md_queue_snapshot_free(jobs, count);
 }
 
 int main(int argc, char **argv)
 {
-    ZdQuery query = {.min_minutes = 10, .hide_variants = true};
-    ZdJobOptions options = {.dir = ".", .gpu_quality = ZD_DEFAULT_GPU_QUALITY,
-                            .cpu_rf = ZD_DEFAULT_CPU_RF};
+    MdQuery query = {.min_minutes = 10, .hide_variants = true};
+    MdJobOptions options = {.dir = ".", .gpu_quality = MD_DEFAULT_GPU_QUALITY,
+                            .cpu_rf = MD_DEFAULT_CPU_RF};
     const char *selection = NULL;
     double limit_mb = 0;
     int parallel = 2, season = -1;
@@ -201,8 +201,8 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--filme")) query.kind = ZD_KIND_FILMS;
-        else if (!strcmp(a, "--serien")) query.kind = ZD_KIND_SERIES;
+        if (!strcmp(a, "--filme")) query.kind = MD_KIND_FILMS;
+        else if (!strcmp(a, "--serien")) query.kind = MD_KIND_SERIES;
         else if (!strcmp(a, "--varianten")) query.hide_variants = false;
         else if (!strcmp(a, "--mindestlaenge")) query.min_minutes = atoi(option_value(argc, argv, &i));
         else if (!strcmp(a, "--laden")) selection = option_value(argc, argv, &i);
@@ -221,12 +221,12 @@ int main(int argc, char **argv)
             skip_subtitles = g_strsplit(option_value(argc, argv, &i), ",", -1);
         else if (!strcmp(a, "--qualitaet")) {
             const char *v = option_value(argc, argv, &i);
-            options.quality = !strcmp(v, "mittel") ? ZD_QUALITY_MEDIUM
-                            : !strcmp(v, "niedrig") ? ZD_QUALITY_LOW : ZD_QUALITY_HIGH;
+            options.quality = !strcmp(v, "mittel") ? MD_QUALITY_MEDIUM
+                            : !strcmp(v, "niedrig") ? MD_QUALITY_LOW : MD_QUALITY_HIGH;
         } else if (!strcmp(a, "--av1")) {
             options.convert = true;
-            options.encoder = strcmp(option_value(argc, argv, &i), "cpu") ? ZD_ENCODER_GPU
-                                                                          : ZD_ENCODER_CPU;
+            options.encoder = strcmp(option_value(argc, argv, &i), "cpu") ? MD_ENCODER_GPU
+                                                                          : MD_ENCODER_CPU;
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
             fputs(USAGE, stdout);
             return 0;
@@ -237,37 +237,37 @@ int main(int argc, char **argv)
             query.text = a;
         }
     }
-    if (!query.text && query.kind == ZD_KIND_ALL && !show_history) {
+    if (!query.text && query.kind == MD_KIND_ALL && !show_history) {
         fputs(USAGE, stderr);
         return 2;
     }
     char *missing = NULL;
-    if (!zd_have_tools(&missing)) {
+    if (!md_have_tools(&missing)) {
         fprintf(stderr, "%s ist nicht installiert.\n", missing);
         return 1;
     }
 
-    zd_init(false);
+    md_init(false);
     if (show_history) {
         int rc = print_history();
-        zd_shutdown();
+        md_shutdown();
         return rc;
     }
     bool truncated = false;
     char *error = NULL;
-    GPtrArray *titles = zd_search(&query, NULL, &truncated, &error);
+    GPtrArray *titles = md_search(&query, NULL, &truncated, &error);
     if (!titles) {
         fprintf(stderr, "%s\n", error);
-        zd_shutdown();
+        md_shutdown();
         return 1;
     }
     options.skip_audio = (const char *const *)skip_audio;
     options.skip_subtitles = (const char *const *)skip_subtitles;
     for (guint i = titles->len; season >= 0 && i-- > 0;)
-        if (((ZdTitle *)titles->pdata[i])->season != season) g_ptr_array_remove_index(titles, i);
+        if (((MdTitle *)titles->pdata[i])->season != season) g_ptr_array_remove_index(titles, i);
     for (guint i = titles->len; only_missing && i-- > 0;) {
-        ZdStatus status = zd_title_status(titles->pdata[i], options.dir, NULL);
-        if (status == ZD_STATUS_DONE || status == ZD_STATUS_QUEUED)
+        MdStatus status = md_title_status(titles->pdata[i], options.dir, NULL);
+        if (status == MD_STATUS_DONE || status == MD_STATUS_QUEUED)
             g_ptr_array_remove_index(titles, i);
     }
     print_titles(titles, options.dir);
@@ -278,17 +278,17 @@ int main(int argc, char **argv)
         sigaction(SIGINT, &action, NULL);
         sigaction(SIGTERM, &action, NULL);
         signal(SIGPIPE, SIG_IGN);
-        zd_set_rate_limit((gint64)(limit_mb * 1e6));
-        zd_set_parallel(parallel, 1);
+        md_set_rate_limit((gint64)(limit_mb * 1e6));
+        md_set_parallel(parallel, 1);
         bool *selected = parse_selection(selection, (int)titles->len);
         for (guint i = 0; i < titles->len; i++)
-            if (selected[i]) zd_queue_add(titles->pdata[i], &options);
+            if (selected[i]) md_queue_add(titles->pdata[i], &options);
         g_free(selected);
         int failed = wait_for_queue();
         if (failed) print_failures();
         rc = g_stop ? 130 : failed ? 1 : 0;
     }
     g_ptr_array_free(titles, TRUE);
-    zd_shutdown();
+    md_shutdown();
     return rc;
 }

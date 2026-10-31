@@ -1,9 +1,9 @@
 /*
- * ZDF-Downloader – Engine
- * =======================
- * Sucht Filme und Serien der ZDF-Mediathek, lädt sie herunter und wandelt sie auf
- * Wunsch nach AV1 um. Bedient wird die Engine über zd_core.h – von der
- * Terminal-Version (zd_cli.c) und der grafischen Oberfläche (zd_gui.c).
+ * Mediathek Downloader – Engine
+ * =============================
+ * Sucht Filme und Serien in den Mediatheken von ZDF, ARD und 3sat, lädt sie herunter
+ * und wandelt sie auf Wunsch nach AV1 um. Bedient wird die Engine über md_core.h – von
+ * der Terminal-Version (md_cli.c) und der grafischen Oberfläche (md_gui.c).
  *
  * Quellen und Werkzeuge:
  *   * Suche: API von MediathekViewWeb (Metadaten und direkte MP4-Adressen).
@@ -25,14 +25,14 @@
  *   * Fertige Downloads heißen erst nach der Größenprüfung <Name>.mp4.
  *   * AV1-Ergebnisse entstehen in einer versteckten Temp-Datei und werden geprüft
  *     (AV1-Spur, Dauer). Ist das Ergebnis nicht kleiner, bleibt die MP4-Datei.
- *   * Die Warteschlange steht in ~/.zdf-downloader/warteschlange.tsv. Nach dem
+ *   * Die Warteschlange steht in ~/.mediathek-downloader/warteschlange.tsv. Nach dem
  *     Start sind offene Aufträge pausiert und warten auf "Fortsetzen".
  *
  * Aufbau dieser Datei: Konfiguration – kleine Helfer – Protokoll – Prozesse –
  * JSON-Leser – Suche – Pfade – Warteschlange (Speichern, Laden) – Download –
  * Umwandlung – Verteiler – öffentliche Schnittstelle
  *
- * Namenskonventionen: zd_* = öffentliche Schnittstelle (zd_core.h), q.* = globaler
+ * Namenskonventionen: md_* = öffentliche Schnittstelle (md_core.h), q.* = globaler
  * Zustand der Warteschlange (geschützt durch q.lock), GROSSBUCHSTABEN = Konstanten.
  */
 #define _GNU_SOURCE
@@ -55,13 +55,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "zd_core.h"
+#include "md_core.h"
 
 /* ---------------------------------------------------------------------------
  * Konfiguration
  * ------------------------------------------------------------------------- */
 #define API_URL "https://mediathekviewweb.de/api/query"
-#define USER_AGENT "zdf-downloader/" ZD_VERSION
+#define USER_AGENT "mediathek-downloader/" MD_VERSION
 #define COVER_PAGE_PREFIX "https://www.zdf.de/"
 #define COVER_URL_PREFIX "https://www.zdf.de/assets/"
 #define COVER_EPG_PREFIX "https://epg-image.zdf.de/"
@@ -90,7 +90,9 @@
 #define ENCODER_NICE 5
 #define SVT_PRESET "6"
 #define GOP_FRAMES "500"            /* Keyframe alle 10 s bei 50 Bildern/s */
-#define QUEUE_HEADER "#zdf-downloader-warteschlange 1"
+#define QUEUE_HEADER "#mediathek-downloader-warteschlange 1"
+#define QUEUE_HEADER_OLD "#zdf-downloader-warteschlange 1"
+#define OLD_APP_DIR ".zdf-downloader"
 #define HISTORY_FILE "verlauf.tsv"
 #define AUDIO_BYTES_PER_SECOND 16000    /* Zusatzspur: AAC 128 kbit/s */
 #define VARIANT_MAX_DIFFERENCE 30       /* Sekunden: so nah muss die Länge der Fassungen sein */
@@ -112,9 +114,9 @@ static const struct {
     int source;
     const char *query, *channel, *label;
 } SOURCES[] = {
-    {ZD_SOURCE_ZDF, "zdf", "ZDF", "ZDF"},
-    {ZD_SOURCE_ARD, "ard", "ARD", "ARD"},
-    {ZD_SOURCE_3SAT, "3sat", "3Sat", "3sat"},
+    {MD_SOURCE_ZDF, "zdf", "ZDF", "ZDF"},
+    {MD_SOURCE_ARD, "ard", "ARD", "ARD"},
+    {MD_SOURCE_3SAT, "3sat", "3Sat", "3sat"},
 };
 
 /* Rubriken, deren Einträge Filme sind (Stöbern ohne Suchbegriff) */
@@ -138,10 +140,10 @@ typedef struct {
     int season, episode;
     GPtrArray *extras;              /* Extra* */
     bool convert, keep_original;
-    ZdEncoder encoder;
+    MdEncoder encoder;
     int gpu_quality, cpu_rf;
 
-    ZdJobState state;
+    MdJobState state;
     bool paused, remove_requested;
     bool worker;                    /* ein Thread arbeitet an diesem Auftrag */
     char *message;
@@ -169,12 +171,12 @@ static GMutex g_log_lock;
 /* ---------------------------------------------------------------------------
  * Kleine Helfer
  * ------------------------------------------------------------------------- */
-const char *zd_app_dir(void)
+const char *md_app_dir(void)
 {
     return g_app_dir;
 }
 
-const char *zd_log_path(void)
+const char *md_log_path(void)
 {
     return g_log_path;
 }
@@ -187,14 +189,14 @@ static char *with_decimal_comma(char *text)
     return text;
 }
 
-char *zd_format_size(double bytes)
+char *md_format_size(double bytes)
 {
     if (bytes >= 1e9) return with_decimal_comma(g_strdup_printf("%.1f GB", bytes / 1e9));
     if (bytes >= 1e6) return g_strdup_printf("%.0f MB", bytes / 1e6);
     return g_strdup_printf("%.0f kB", bytes / 1e3);
 }
 
-char *zd_format_time(double seconds)
+char *md_format_time(double seconds)
 {
     int s = (int)(seconds + 0.5);
     if (s >= 3600) return g_strdup_printf("%d h %02d min", s / 3600, s / 60 % 60);
@@ -258,7 +260,7 @@ static char *result_path(const char *target)
 /* ---------------------------------------------------------------------------
  * Protokoll
  * ------------------------------------------------------------------------- */
-void zd_log(const char *format, ...)
+void md_log(const char *format, ...)
 {
     if (!g_log_path) return;
     va_list args;
@@ -455,9 +457,9 @@ static void json_skip(Json *j, int depth)
 /* ---------------------------------------------------------------------------
  * Suche
  * ------------------------------------------------------------------------- */
-void zd_title_free(gpointer data)
+void md_title_free(gpointer data)
 {
-    ZdTitle *t = data;
+    MdTitle *t = data;
     if (!t) return;
     g_free(t->channel);
     g_free(t->topic);
@@ -476,16 +478,16 @@ void zd_title_free(gpointer data)
 
 static void track_free(gpointer data)
 {
-    ZdTrack *track = data;
+    MdTrack *track = data;
     g_free(track->label);
     g_free(track->lang);
     g_free(track->url);
     g_free(track);
 }
 
-static ZdTrack *track_new(const char *label, const char *lang, const char *url)
+static MdTrack *track_new(const char *label, const char *lang, const char *url)
 {
-    ZdTrack *track = g_new0(ZdTrack, 1);
+    MdTrack *track = g_new0(MdTrack, 1);
     track->label = g_strdup(label);
     track->lang = g_strdup(lang);
     track->url = g_strdup(url);
@@ -505,13 +507,13 @@ static void json_append_escaped(GString *out, const char *text)
 /* Mediathek eines Senders; 0 = keine der unterstützten */
 static int source_of(const char *channel)
 {
-    if (!g_ascii_strncasecmp(channel, "ZDF", 3)) return ZD_SOURCE_ZDF;
+    if (!g_ascii_strncasecmp(channel, "ZDF", 3)) return MD_SOURCE_ZDF;
     for (size_t i = 1; i < G_N_ELEMENTS(SOURCES); i++)
         if (!g_ascii_strcasecmp(channel, SOURCES[i].channel)) return SOURCES[i].source;
     return 0;
 }
 
-const char *zd_source_label(int source)
+const char *md_source_label(int source)
 {
     for (size_t i = 0; i < G_N_ELEMENTS(SOURCES); i++)
         if (SOURCES[i].source == source) return SOURCES[i].label;
@@ -519,7 +521,7 @@ const char *zd_source_label(int source)
 }
 
 /* Staffel, Folge und bereinigten Namen aus dem Titel ableiten */
-static void title_analyse(ZdTitle *t)
+static void title_analyse(MdTitle *t)
 {
     static GRegex *episode_tag, *new_episodes, *numbered, *show_suffix;
     static gsize once;
@@ -557,7 +559,7 @@ static void title_analyse(ZdTitle *t)
         break;
     }
     g_strstrip(t->name);
-    if (t->source == ZD_SOURCE_ARD) {                   /* "… · Praxis mit Meerblick" */
+    if (t->source == MD_SOURCE_ARD) {                   /* "… · Praxis mit Meerblick" */
         char *short_name = g_regex_replace_literal(show_suffix, t->name, -1, 0, "", 0, NULL);
         g_free(t->name);
         t->name = short_name;
@@ -569,7 +571,7 @@ static void title_analyse(ZdTitle *t)
                                    || strstr(topic, "kino"));
     g_free(topic);
     /* Die ARD nennt oft nur "Folge 5": ohne Angabe gilt Staffel 1 */
-    if (t->source != ZD_SOURCE_ZDF && t->season < 0 && !t->is_film &&
+    if (t->source != MD_SOURCE_ZDF && t->season < 0 && !t->is_film &&
         g_regex_match(numbered, t->name, 0, &match)) {
         char *first = g_match_info_fetch(match, 1), *second = g_match_info_fetch(match, 2);
         t->season = 1;
@@ -584,7 +586,7 @@ static void title_analyse(ZdTitle *t)
         g_strchomp(t->name);
     }
     /* "Der Nachtmann (1)": die Nummer steht schon in der Folge */
-    char *number = t->source != ZD_SOURCE_ZDF ? strrchr(t->name, '(') : NULL;
+    char *number = t->source != MD_SOURCE_ZDF ? strrchr(t->name, '(') : NULL;
     if (number && t->episode >= 0 && g_ascii_isdigit(number[1]) && g_str_has_suffix(t->name, ")")) {
         *number = 0;
         g_strchomp(t->name);
@@ -592,9 +594,9 @@ static void title_analyse(ZdTitle *t)
 }
 
 /* Ein Objekt aus "results" lesen */
-static ZdTitle *json_read_title(Json *j)
+static MdTitle *json_read_title(Json *j)
 {
-    ZdTitle *t = g_new0(ZdTitle, 1);
+    MdTitle *t = g_new0(MdTitle, 1);
     if (!json_accept(j, '{')) j->ok = false;
     if (j->ok && !json_accept(j, '}')) {
         do {
@@ -705,7 +707,7 @@ static char *cover_dir;         /* NULL = Standardordner */
 static char *cache_dir(void)
 {
     g_mutex_lock(&cover_lock);
-    char *dir = cover_dir ? g_strdup(cover_dir) : zd_default_cover_dir();
+    char *dir = cover_dir ? g_strdup(cover_dir) : md_default_cover_dir();
     g_mutex_unlock(&cover_lock);
     g_mkdir_with_parents(dir, 0755);
     return dir;
@@ -740,7 +742,7 @@ static bool search_cache_read(const char *path, char **reply)
 
 /* Eine Seite der Suche abrufen */
 static bool fetch_page(const char *channel, const char *text, const char *field, int min_seconds,
-                       int offset, ZdCache cache, GPtrArray *out, int *total, char **error)
+                       int offset, MdCache cache, GPtrArray *out, int *total, char **error)
 {
     GString *body = g_string_new(NULL);
     g_string_printf(body, "{\"queries\":[{\"fields\":[\"channel\"],\"query\":\"%s\"}", channel);
@@ -757,9 +759,9 @@ static bool fetch_page(const char *channel, const char *text, const char *field,
                     "Content-Type: text/plain", "--data-binary", body->str, API_URL, NULL};
     char *reply = NULL, *messages = NULL;
     /* Antworten für die Vorschau werden aufgehoben, damit der Start ohne Netz auskommt */
-    char *saved = cache != ZD_CACHE_OFF ? search_cache_path(body->str) : NULL;
+    char *saved = cache != MD_CACHE_OFF ? search_cache_path(body->str) : NULL;
     int rc = 0;
-    if (cache != ZD_CACHE_USE || !search_cache_read(saved, &reply)) {
+    if (cache != MD_CACHE_USE || !search_cache_read(saved, &reply)) {
         rc = run_capture(argv, &reply, &messages);
         if (saved && rc == 0 && reply) g_file_set_contents(saved, reply, -1, NULL);
     }
@@ -779,7 +781,7 @@ static bool fetch_page(const char *channel, const char *text, const char *field,
 
 /* Alle Seiten einer Anfrage abrufen, begrenzt auf SEARCH_MAX */
 static bool fetch_all(const char *channel, const char *text, const char *field, int min_seconds,
-                      ZdCache cache, GPtrArray *out, const volatile gint *cancel, bool *truncated,
+                      MdCache cache, GPtrArray *out, const volatile gint *cancel, bool *truncated,
                       char **error)
 {
     int total = 0;
@@ -795,21 +797,21 @@ static bool fetch_all(const char *channel, const char *text, const char *field, 
 }
 
 /* Eintrag anzeigen? (Filter, die die API nicht kennt) */
-static bool title_matches(const ZdTitle *t, const ZdQuery *query)
+static bool title_matches(const MdTitle *t, const MdQuery *query)
 {
-    if (!(t->source & (query->sources ? query->sources : ZD_SOURCE_ALL))) return false;
+    if (!(t->source & (query->sources ? query->sources : MD_SOURCE_ALL))) return false;
     if (!*t->url_high && !*t->url_medium && !*t->url_low) return false;
     if (t->duration < query->min_minutes * 60) return false;
     if (query->hide_variants && t->is_variant) return false;
-    if (query->kind == ZD_KIND_FILMS && !t->is_film) return false;
-    if (query->kind == ZD_KIND_SERIES && (t->is_film ||
-                                          (t->season < 0 && t->source == ZD_SOURCE_ZDF)))
+    if (query->kind == MD_KIND_FILMS && !t->is_film) return false;
+    if (query->kind == MD_KIND_SERIES && (t->is_film ||
+                                          (t->season < 0 && t->source == MD_SOURCE_ZDF)))
         return false;
     return true;
 }
 
 /* Schlüssel, unter dem die Fassungen eines Titels zusammenfinden */
-static char *variant_key(const ZdTitle *t)
+static char *variant_key(const MdTitle *t)
 {
     char *lower = g_utf8_strdown(t->name, -1);
     char *key = g_strdup_printf("%d\n%s\n%s\n%d\n%d", t->source, t->topic, lower, t->season,
@@ -819,13 +821,13 @@ static char *variant_key(const ZdTitle *t)
 }
 
 /* Untertitel eines Eintrags aufnehmen (WebVTT liegt neben der XML-Datei) */
-static void add_subtitle(ZdTitle *main_title, const ZdTitle *source)
+static void add_subtitle(MdTitle *main_title, const MdTitle *source)
 {
     if (!*source->url_subtitle) return;
     const char *label = strstr(source->url_subtitle, "_eng_") ? "Englisch" : "Deutsch";
     const char *lang = strstr(source->url_subtitle, "_eng_") ? "eng" : "deu";
     for (guint i = 0; i < main_title->subtitles->len; i++) {
-        const ZdTrack *known = main_title->subtitles->pdata[i];
+        const MdTrack *known = main_title->subtitles->pdata[i];
         if (!strcmp(known->label, label)) return;
     }
     char *url = g_strdup(source->url_subtitle);
@@ -848,7 +850,7 @@ static void merge_variants(GPtrArray *raw)
 {
     GHashTable *mains = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint i = 0; i < raw->len; i++) {
-        ZdTitle *t = raw->pdata[i];
+        MdTitle *t = raw->pdata[i];
         t->audio = g_ptr_array_new_with_free_func(track_free);
         t->subtitles = g_ptr_array_new_with_free_func(track_free);
         g_ptr_array_add(t->audio, track_new(t->track_label ? t->track_label : "Deutsch",
@@ -857,39 +859,39 @@ static void merge_variants(GPtrArray *raw)
         if (!t->track_label && !t->is_variant) g_hash_table_insert(mains, variant_key(t), t);
     }
     for (guint i = 0; i < raw->len; i++) {
-        ZdTitle *t = raw->pdata[i];
+        MdTitle *t = raw->pdata[i];
         if (!t->track_label) continue;
         char *key = variant_key(t);
-        ZdTitle *main_title = g_hash_table_lookup(mains, key);
+        MdTitle *main_title = g_hash_table_lookup(mains, key);
         g_free(key);
         if (!main_title || ABS(main_title->duration - t->duration) > VARIANT_MAX_DIFFERENCE)
             continue;
         bool known = false;
         for (guint n = 0; n < main_title->audio->len; n++)
-            known |= !strcmp(((ZdTrack *)main_title->audio->pdata[n])->label, t->track_label);
+            known |= !strcmp(((MdTrack *)main_title->audio->pdata[n])->label, t->track_label);
         if (!known)
             g_ptr_array_add(main_title->audio, track_new(t->track_label, t->track_lang,
-                                                         zd_title_url(t, ZD_QUALITY_LOW)));
+                                                         md_title_url(t, MD_QUALITY_LOW)));
         add_subtitle(main_title, t);
-        zd_title_free(t);
+        md_title_free(t);
         raw->pdata[i] = NULL;
     }
     g_hash_table_destroy(mains);
 }
 
 /* Eine Mediathek abfragen */
-static bool search_source(const char *channel, const ZdQuery *query, GPtrArray *raw,
+static bool search_source(const char *channel, const MdQuery *query, GPtrArray *raw,
                           const volatile gint *cancel, bool *truncated, char **error)
 {
     const char *text = query->text ? query->text : "";
     const char *both = "\"topic\",\"title\"";
     int min_seconds = query->min_minutes * 60;
     bool ok = true;
-    if (!*text && query->kind == ZD_KIND_FILMS) {
+    if (!*text && query->kind == MD_KIND_FILMS) {
         for (size_t i = 0; ok && i < G_N_ELEMENTS(FILM_TOPICS); i++)
             ok = fetch_all(channel, FILM_TOPICS[i], "\"topic\"", min_seconds, query->cache, raw,
                            cancel, truncated, error);
-    } else if (!*text && query->kind == ZD_KIND_SERIES) {
+    } else if (!*text && query->kind == MD_KIND_SERIES) {
         ok = fetch_all(channel, "", both, MAX(min_seconds, BROWSE_MIN_SECONDS), query->cache, raw,
                        cancel, truncated, error);
     } else {
@@ -904,25 +906,25 @@ static void drop_single_shows(GPtrArray *titles)
 {
     GHashTable *counts = g_hash_table_new(g_str_hash, g_str_equal);
     for (guint i = 0; i < titles->len; i++) {
-        const char *topic = ((ZdTitle *)titles->pdata[i])->topic;
+        const char *topic = ((MdTitle *)titles->pdata[i])->topic;
         int count = GPOINTER_TO_INT(g_hash_table_lookup(counts, topic));
         g_hash_table_insert(counts, (char *)topic, GINT_TO_POINTER(count + 1));
     }
     for (guint i = titles->len; i-- > 0;) {
-        const ZdTitle *t = titles->pdata[i];
+        const MdTitle *t = titles->pdata[i];
         if (t->season < 0 && GPOINTER_TO_INT(g_hash_table_lookup(counts, t->topic)) < 2)
             g_ptr_array_remove_index(titles, i);
     }
     g_hash_table_destroy(counts);
 }
 
-GPtrArray *zd_search(const ZdQuery *query, const volatile gint *cancel, bool *truncated,
+GPtrArray *md_search(const MdQuery *query, const volatile gint *cancel, bool *truncated,
                      char **error)
 {
-    GPtrArray *raw = g_ptr_array_new_with_free_func(zd_title_free);
+    GPtrArray *raw = g_ptr_array_new_with_free_func(md_title_free);
     bool ok = true;
     if (truncated) *truncated = false;
-    int sources = query->sources ? query->sources : ZD_SOURCE_ALL;
+    int sources = query->sources ? query->sources : MD_SOURCE_ALL;
     for (size_t i = 0; ok && i < G_N_ELEMENTS(SOURCES); i++)
         if (sources & SOURCES[i].source)
             ok = search_source(SOURCES[i].query, query, raw, cancel, truncated, error);
@@ -934,16 +936,16 @@ GPtrArray *zd_search(const ZdQuery *query, const volatile gint *cancel, bool *tr
     merge_variants(raw);
 
     /* Filtern; dieselbe Videodatei kann unter mehreren Rubriken stehen */
-    GPtrArray *result = g_ptr_array_new_with_free_func(zd_title_free);
+    GPtrArray *result = g_ptr_array_new_with_free_func(md_title_free);
     GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
     GHashTable *episodes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint i = 0; i < raw->len; i++) {
-        ZdTitle *t = raw->pdata[i];
+        MdTitle *t = raw->pdata[i];
         if (!t) continue;
-        const char *url = zd_title_url(t, ZD_QUALITY_HIGH);
+        const char *url = md_title_url(t, MD_QUALITY_HIGH);
         if (!title_matches(t, query) || !g_hash_table_add(seen, (char *)url)) continue;
         /* Die ARD führt manche Folge doppelt: mit Staffelangabe und nur mit Nummer */
-        if (t->source != ZD_SOURCE_ZDF && t->season >= 0 && !t->track_label &&
+        if (t->source != MD_SOURCE_ZDF && t->season >= 0 && !t->track_label &&
             !g_hash_table_add(episodes, variant_key(t)))
             continue;
         raw->pdata[i] = NULL;
@@ -952,11 +954,11 @@ GPtrArray *zd_search(const ZdQuery *query, const volatile gint *cancel, bool *tr
     g_hash_table_destroy(seen);
     g_hash_table_destroy(episodes);
     g_ptr_array_free(raw, TRUE);
-    if (query->kind == ZD_KIND_SERIES) drop_single_shows(result);
+    if (query->kind == MD_KIND_SERIES) drop_single_shows(result);
     return result;
 }
 
-const char *zd_title_url(const ZdTitle *t, ZdQuality quality)
+const char *md_title_url(const MdTitle *t, MdQuality quality)
 {
     const char *order[3][3] = {{t->url_high, t->url_medium, t->url_low},
                                {t->url_medium, t->url_low, t->url_high},
@@ -966,7 +968,7 @@ const char *zd_title_url(const ZdTitle *t, ZdQuality quality)
     return "";
 }
 
-gint64 zd_title_estimate(const ZdTitle *t, ZdQuality quality)
+gint64 md_title_estimate(const MdTitle *t, MdQuality quality)
 {
     static const double KBIT_PER_SECOND[] = {6660, 3360, 808};
     return (gint64)(t->duration * KBIT_PER_SECOND[quality] * 1000 / 8);
@@ -1000,7 +1002,7 @@ static char *safe_name(const char *text)
     return name;
 }
 
-char *zd_target_path(const ZdTitle *t, const char *dir)
+char *md_target_path(const MdTitle *t, const char *dir)
 {
     char *topic = safe_name(t->topic), *name = safe_name(t->name), *file, *path;
     if (t->season >= 0) {
@@ -1029,7 +1031,7 @@ char *zd_target_path(const ZdTitle *t, const char *dir)
 
 /* Eindeutiger Name eines Titels, unabhängig von Qualität und Speicherort. Folgen zählen nach
  * Staffel und Folge, weil das ZDF die Titel nachträglich ändert ("- Neue Folgen"). */
-static char *title_key(const ZdTitle *t)
+static char *title_key(const MdTitle *t)
 {
     char *topic = g_utf8_strdown(t->topic, -1), *name = g_utf8_strdown(t->name, -1), *key;
     if (t->season >= 0) {
@@ -1047,12 +1049,12 @@ static char *title_key(const ZdTitle *t)
 /* ---------------------------------------------------------------------------
  * Verlauf
  *
- * Merkt sich jede fertige Datei in ~/.zdf-downloader/verlauf.tsv. So bleibt eine Folge
+ * Merkt sich jede fertige Datei in ~/.mediathek-downloader/verlauf.tsv. So bleibt eine Folge
  * auch dann als geladen erkennbar, wenn der Speicherort inzwischen ein anderer ist.
  * -------------------------------------------------------------------------*/
 typedef struct {
     char *key;
-    ZdHistoryEntry e;
+    MdHistoryEntry e;
 } History;
 
 static void history_free(gpointer data)
@@ -1067,7 +1069,7 @@ static void history_free(gpointer data)
 
 static char *history_path(void)
 {
-    return g_build_filename(zd_app_dir(), HISTORY_FILE, NULL);
+    return g_build_filename(md_app_dir(), HISTORY_FILE, NULL);
 }
 
 /* Zeile der Verlaufsdatei bauen */
@@ -1135,7 +1137,7 @@ static void history_add(const Job *j)
         fputs(line->str, file);
         fclose(file);
     } else {
-        zd_log("Verlauf lässt sich nicht schreiben: %s", g_strerror(errno));
+        md_log("Verlauf lässt sich nicht schreiben: %s", g_strerror(errno));
     }
     g_free(path);
     g_string_free(line, TRUE);
@@ -1158,18 +1160,18 @@ static void history_save(void)
 
 static int history_compare(gconstpointer a, gconstpointer b)
 {
-    const ZdHistoryEntry *x = a, *y = b;
+    const MdHistoryEntry *x = a, *y = b;
     int order = g_utf8_collate(x->topic, y->topic);
     if (!order) order = x->season - y->season;
     if (!order) order = x->episode - y->episode;
     return order ? order : g_utf8_collate(x->title, y->title);
 }
 
-ZdHistoryEntry *zd_history_snapshot(int *count)
+MdHistoryEntry *md_history_snapshot(int *count)
 {
     g_mutex_lock(&q.lock);
     *count = (int)g_hash_table_size(q.history);
-    ZdHistoryEntry *entries = g_new0(ZdHistoryEntry, MAX(*count, 1));
+    MdHistoryEntry *entries = g_new0(MdHistoryEntry, MAX(*count, 1));
     GHashTableIter iter;
     gpointer value;
     int n = 0;
@@ -1189,7 +1191,7 @@ ZdHistoryEntry *zd_history_snapshot(int *count)
     return entries;
 }
 
-void zd_history_snapshot_free(ZdHistoryEntry *entries, int count)
+void md_history_snapshot_free(MdHistoryEntry *entries, int count)
 {
     for (int i = 0; i < count; i++) {
         g_free(entries[i].topic);
@@ -1205,21 +1207,21 @@ static gboolean history_has_path(gpointer key, gpointer value, gpointer path)
     return !strcmp(((History *)value)->e.path, path);
 }
 
-void zd_history_forget(const char *path)
+void md_history_forget(const char *path)
 {
     g_mutex_lock(&q.lock);
     if (g_hash_table_foreach_remove(q.history, history_has_path, (gpointer)path)) history_save();
     g_mutex_unlock(&q.lock);
 }
 
-ZdStatus zd_title_status(const ZdTitle *t, const char *dir, char **path)
+MdStatus md_title_status(const MdTitle *t, const char *dir, char **path)
 {
-    char *target = zd_target_path(t, dir), *key = title_key(t), *known = NULL;
+    char *target = md_target_path(t, dir), *key = title_key(t), *known = NULL;
     bool queued = false, recorded = false;
     g_mutex_lock(&q.lock);
     for (guint i = 0; i < q.jobs->len && !queued; i++) {
         const Job *j = q.jobs->pdata[i];
-        queued = !strcmp(j->key, key) && j->state != ZD_JOB_DONE && j->state != ZD_JOB_FAILED;
+        queued = !strcmp(j->key, key) && j->state != MD_JOB_DONE && j->state != MD_JOB_FAILED;
     }
     const History *h = g_hash_table_lookup(q.history, key);
     if (h) {
@@ -1234,10 +1236,10 @@ ZdStatus zd_title_status(const ZdTitle *t, const char *dir, char **path)
     else if (file_size(result) > 0) found = result;
     else if (file_size(target) > 0) found = target;
 
-    ZdStatus status = queued ? ZD_STATUS_QUEUED
-                    : found ? ZD_STATUS_DONE
-                    : file_size(part) >= 0 ? ZD_STATUS_PARTIAL
-                    : recorded ? ZD_STATUS_GONE : ZD_STATUS_MISSING;
+    MdStatus status = queued ? MD_STATUS_QUEUED
+                    : found ? MD_STATUS_DONE
+                    : file_size(part) >= 0 ? MD_STATUS_PARTIAL
+                    : recorded ? MD_STATUS_GONE : MD_STATUS_MISSING;
     if (path) *path = g_strdup(found);
     g_free(target);
     g_free(key);
@@ -1448,12 +1450,12 @@ static char *page_info(const char *website)
     return info;
 }
 
-ZdPageInfo *zd_page_info(const char *website)
+MdPageInfo *md_page_info(const char *website)
 {
     char *info = page_info(website);
     if (!info) return NULL;
     char **lines = g_strsplit(info, "\n", -1);
-    ZdPageInfo *result = g_new0(ZdPageInfo, 1);
+    MdPageInfo *result = g_new0(MdPageInfo, 1);
     GPtrArray *genres = g_ptr_array_new();
     for (int i = 0; lines[i]; i++) {
         if (i == 1 && *lines[i]) result->fsk = g_strdup(lines[i]);
@@ -1466,7 +1468,7 @@ ZdPageInfo *zd_page_info(const char *website)
     return result;
 }
 
-void zd_page_info_free(ZdPageInfo *info)
+void md_page_info_free(MdPageInfo *info)
 {
     if (!info) return;
     g_free(info->fsk);
@@ -1474,7 +1476,7 @@ void zd_page_info_free(ZdPageInfo *info)
     g_free(info);
 }
 
-void zd_set_cover_dir(const char *dir)
+void md_set_cover_dir(const char *dir)
 {
     g_mutex_lock(&cover_lock);
     g_free(cover_dir);
@@ -1482,12 +1484,12 @@ void zd_set_cover_dir(const char *dir)
     g_mutex_unlock(&cover_lock);
 }
 
-char *zd_default_cover_dir(void)
+char *md_default_cover_dir(void)
 {
-    return g_build_filename(zd_app_dir(), "bilder", NULL);
+    return g_build_filename(md_app_dir(), "bilder", NULL);
 }
 
-char *zd_cover_file(const char *website)
+char *md_cover_file(const char *website)
 {
     char *info = page_info(website);
     if (!info || *info == '\n') {
@@ -1627,13 +1629,13 @@ static char *imdb_lookup(const char *name, bool is_film, int *year)
     return id;
 }
 
-char *zd_imdb_url(const char *name, bool is_film)
+char *md_imdb_url(const char *name, bool is_film)
 {
     char *id = imdb_lookup(name, is_film, NULL);
     char *full = g_uri_escape_string(name, NULL, FALSE);
     char *url = id ? g_strdup_printf("https://www.imdb.com/title/%s/", id)
                    : g_strdup_printf("https://www.imdb.com/find/?q=%s", full);
-    zd_log("IMDb: %s -> %s", name, url);
+    md_log("IMDb: %s -> %s", name, url);
     g_free(id);
     g_free(full);
     return url;
@@ -1655,7 +1657,7 @@ static char *imdb_ratings_file(void)
         char *messages = NULL, *more = NULL;
         if (run_capture(fetch, NULL, &messages) == 0 && run_capture(unpack, NULL, &more) == 0)
             g_rename(plain, path);
-        else zd_log("IMDb-Bewertungen nicht geladen");
+        else md_log("IMDb-Bewertungen nicht geladen");
         g_unlink(packed);
         g_unlink(plain);
         g_free(messages);
@@ -1669,7 +1671,7 @@ static char *imdb_ratings_file(void)
 }
 
 /* Zeile "tt5362988<Tab>7.7<Tab>322319" suchen */
-static void imdb_read_rating(const char *id, ZdImdbInfo *info)
+static void imdb_read_rating(const char *id, MdImdbInfo *info)
 {
     char *path = imdb_ratings_file();
     GMappedFile *file = g_mapped_file_new(path, FALSE, NULL);
@@ -1688,7 +1690,7 @@ static void imdb_read_rating(const char *id, ZdImdbInfo *info)
     g_mapped_file_unref(file);
 }
 
-bool zd_imdb_info(const char *name, bool is_film, ZdImdbInfo *info)
+bool md_imdb_info(const char *name, bool is_film, MdImdbInfo *info)
 {
     memset(info, 0, sizeof(*info));
     char *id = imdb_lookup(name, is_film, &info->year);
@@ -1755,8 +1757,8 @@ static void queue_save(void)
         Job *j = q.jobs->pdata[i];
         if (j->remove_requested) continue;
         /* unterbrochene Arbeit gilt beim nächsten Start als wartend */
-        ZdJobState state = j->state == ZD_JOB_DOWNLOADING ? ZD_JOB_WAITING
-                         : j->state == ZD_JOB_CONVERTING ? ZD_JOB_CONVERT_WAITING : j->state;
+        MdJobState state = j->state == MD_JOB_DOWNLOADING ? MD_JOB_WAITING
+                         : j->state == MD_JOB_CONVERTING ? MD_JOB_CONVERT_WAITING : j->state;
         char *title = g_strescape(j->title, NULL), *url = g_strescape(j->url, NULL);
         char *target = g_strescape(j->target, NULL);
         char *message = g_strescape(j->message ? j->message : "", NULL);
@@ -1808,7 +1810,8 @@ static void queue_load(void)
     if (!found) return;
     char **lines = g_strsplit(text, "\n", -1);
     g_free(text);
-    if (!lines[0] || strcmp(lines[0], QUEUE_HEADER)) {
+    if (!lines[0] ||
+        (strcmp(lines[0], QUEUE_HEADER) && strcmp(lines[0], QUEUE_HEADER_OLD))) {
         g_strfreev(lines);
         return;
     }
@@ -1817,10 +1820,10 @@ static void queue_load(void)
         if (g_strv_length(f) == 19) {
             Job *j = g_new0(Job, 1);
             j->id = ++q.next_id;
-            j->state = (ZdJobState)CLAMP(atoi(f[0]), ZD_JOB_WAITING, ZD_JOB_FAILED);
+            j->state = (MdJobState)CLAMP(atoi(f[0]), MD_JOB_WAITING, MD_JOB_FAILED);
             j->convert = atoi(f[1]);
             j->keep_original = atoi(f[2]);
-            j->encoder = atoi(f[3]) == ZD_ENCODER_CPU ? ZD_ENCODER_CPU : ZD_ENCODER_GPU;
+            j->encoder = atoi(f[3]) == MD_ENCODER_CPU ? MD_ENCODER_CPU : MD_ENCODER_GPU;
             j->gpu_quality = atoi(f[4]);
             j->cpu_rf = atoi(f[5]);
             j->total = g_ascii_strtoll(f[6], NULL, 10);
@@ -1839,12 +1842,12 @@ static void queue_load(void)
             char *extras = g_strcompress(f[14]);
             extras_from_text(j, extras);
             g_free(extras);
-            j->paused = j->state == ZD_JOB_WAITING || j->state == ZD_JOB_CONVERT_WAITING;
+            j->paused = j->state == MD_JOB_WAITING || j->state == MD_JOB_CONVERT_WAITING;
             j->remaining = -1;
             char *part = g_strconcat(j->target, ".part", NULL);
             j->have = MAX(file_size(part), 0);
             g_free(part);
-            if (j->state == ZD_JOB_WAITING && j->total > 0)
+            if (j->state == MD_JOB_WAITING && j->total > 0)
                 j->progress = (double)j->have / j->total;
             g_ptr_array_add(q.jobs, j);
         }
@@ -1920,8 +1923,8 @@ static void worker_finish(Job *j)
 /* Auftrag als fehlgeschlagen markieren (q.lock gehalten) */
 static void job_fail(Job *j, const char *message)
 {
-    zd_log("FEHLER %s: %s", j->title, message);
-    j->state = ZD_JOB_FAILED;
+    md_log("FEHLER %s: %s", j->title, message);
+    j->state = MD_JOB_FAILED;
     g_free(j->message);
     j->message = g_strdup(message);
 }
@@ -1942,7 +1945,7 @@ static gint64 rate_per_download(void)
     int active = 0;
     for (guint i = 0; i < q.jobs->len; i++) {
         Job *j = q.jobs->pdata[i];
-        if (j->state == ZD_JOB_DOWNLOADING && !j->paused) active++;
+        if (j->state == MD_JOB_DOWNLOADING && !j->paused) active++;
     }
     return MAX(q.rate_limit / MAX(active, 1), 16 * 1024);
 }
@@ -2117,7 +2120,7 @@ static bool download_file(Job *j, const char *url, const char *path, gint64 size
         }
         if (current > progress_mark) failures = 0;  /* es ging voran: neue Versuche */
         progress_mark = current;
-        zd_log("Download unterbrochen (curl %d): %s", rc, j->title);
+        md_log("Download unterbrochen (curl %d): %s", rc, j->title);
         if (++failures >= MAX_FAILURES) {
             *error = g_strdup_printf("Download abgebrochen (curl-Fehler %d). "
                                      "Er lässt sich später fortsetzen.", rc);
@@ -2140,7 +2143,7 @@ static void download_subtitle(Job *j, const Extra *e, const char *path)
     char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, "-o", part,
                     e->url, NULL};
     if (run_capture(argv, NULL, NULL) == 0) g_rename(part, path);
-    else zd_log("Untertitel nicht verfügbar: %s (%s)", j->title, e->url);
+    else md_log("Untertitel nicht verfügbar: %s (%s)", j->title, e->url);
     g_unlink(part);
     g_free(part);
 }
@@ -2216,18 +2219,18 @@ static gpointer download_thread(gpointer data)
     } else if (complete) {
         j->have = j->total;
         j->progress = 0;
-        j->state = processing && !already_there ? ZD_JOB_CONVERT_WAITING : ZD_JOB_DONE;
+        j->state = processing && !already_there ? MD_JOB_CONVERT_WAITING : MD_JOB_DONE;
         if (already_there) {
             g_free(j->message);
             j->message = g_strdup("War schon vorhanden");
         }
-        if (j->state == ZD_JOB_DONE) {
+        if (j->state == MD_JOB_DONE) {
             j->progress = 1;
             history_add(j);
         }
-        zd_log("Download fertig: %s", j->title);
+        md_log("Download fertig: %s", j->title);
     } else {
-        j->state = ZD_JOB_WAITING;                  /* pausiert, abgebrochen oder Programmende */
+        j->state = MD_JOB_WAITING;                  /* pausiert, abgebrochen oder Programmende */
     }
     worker_finish(j);
     g_mutex_unlock(&q.lock);
@@ -2253,7 +2256,7 @@ static const char *render_device(void)
     return *device ? device : NULL;
 }
 
-bool zd_gpu_available(void)
+bool md_gpu_available(void)
 {
     const char *device = render_device();
     if (!device) return false;
@@ -2334,13 +2337,13 @@ static void add_track_metadata(GPtrArray *argv, char kind, int index, const char
 
 /* ffmpeg-Befehl bauen: Bild aus der Hauptdatei, dazu alle vorhandenen Spuren.
  * copy = Bild unverändert übernehmen, sonst AV1 mit dem gewählten Encoder. */
-static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, ZdEncoder encoder, const char *device,
+static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, const char *device,
                                    const char *tmp)
 {
     GPtrArray *a = g_ptr_array_new_with_free_func(g_free);
     args_add(a, (const char *const[]){"ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel",
                                       "error", "-progress", "pipe:1", "-nostats", NULL});
-    if (!copy && encoder == ZD_ENCODER_GPU)
+    if (!copy && encoder == MD_ENCODER_GPU)
         args_add(a, (const char *const[]){"-vaapi_device", device, NULL});
     args_add(a, (const char *const[]){"-i", j->target, NULL});
 
@@ -2371,7 +2374,7 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, ZdEncoder encoder, c
     char quality[16];
     if (copy) {
         args_add(a, (const char *const[]){"-c:v", "copy", NULL});
-    } else if (encoder == ZD_ENCODER_GPU) {
+    } else if (encoder == MD_ENCODER_GPU) {
         snprintf(quality, sizeof quality, "%d", j->gpu_quality);
         args_add(a, (const char *const[]){"-vf", "format=p010,hwupload", "-c:v", "av1_vaapi",
                                           "-rc_mode", "CQP", "-global_quality:v", quality,
@@ -2394,11 +2397,11 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, ZdEncoder encoder, c
 
 /* ffmpeg ausführen -> 0 = fertig, -1 = unterbrochen, sonst Fehler (die letzten
  * ffmpeg-Meldungen landen in *messages) */
-static int run_encoder(Job *j, bool copy, ZdEncoder encoder, const char *tmp, double duration,
+static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *tmp, double duration,
                        char **messages)
 {
     const char *device = render_device();
-    if (!copy && encoder == ZD_ENCODER_GPU && !device) {
+    if (!copy && encoder == MD_ENCODER_GPU && !device) {
         *messages = g_strdup("Kein Render-Gerät gefunden.");
         return 1;
     }
@@ -2504,10 +2507,10 @@ static gpointer convert_thread(gpointer data)
         g_mutex_unlock(&q.lock);
         g_clear_pointer(&messages, g_free);
         int rc = run_encoder(j, copy, j->encoder, tmp, duration, &messages);
-        if (rc > 0 && !copy && j->encoder == ZD_ENCODER_GPU) {
-            zd_log("GPU-Umwandlung fehlgeschlagen, versuche CPU: %s (%s)", j->title, messages);
+        if (rc > 0 && !copy && j->encoder == MD_ENCODER_GPU) {
+            md_log("GPU-Umwandlung fehlgeschlagen, versuche CPU: %s (%s)", j->title, messages);
             g_clear_pointer(&messages, g_free);
-            rc = run_encoder(j, false, ZD_ENCODER_CPU, tmp, duration, &messages);
+            rc = run_encoder(j, false, MD_ENCODER_CPU, tmp, duration, &messages);
         }
         if (rc < 0) {
             interrupted = true;
@@ -2537,12 +2540,12 @@ static gpointer convert_thread(gpointer data)
         } else if (g_rename(tmp, result) != 0) {
             error = g_strdup("Das Ergebnis lässt sich nicht ablegen.");
         } else {
-            char *tracks = tracks_note(j), *after = zd_format_size(file_size(result));
+            char *tracks = tracks_note(j), *after = md_format_size(file_size(result));
             if (copy) {
                 note = g_strdup_printf("%s%s%s", after, tracks,
                                        av1_useless ? " · AV1 wäre nicht kleiner" : "");
             } else {
-                char *before = zd_format_size(comparable_size(j, duration));
+                char *before = md_format_size(comparable_size(j, duration));
                 note = g_strdup_printf("AV1: %s statt %s%s", after, before, tracks);
                 g_free(before);
             }
@@ -2561,14 +2564,14 @@ static gpointer convert_thread(gpointer data)
     if (error) {
         job_fail(j, error);
     } else if (done) {
-        j->state = ZD_JOB_DONE;
+        j->state = MD_JOB_DONE;
         j->progress = 1;
         g_free(j->message);
         j->message = g_strdup(note);
         history_add(j);
-        zd_log("Verarbeitung fertig: %s (%s)", j->title, note);
+        md_log("Verarbeitung fertig: %s (%s)", j->title, note);
     } else if (interrupted) {
-        j->state = ZD_JOB_CONVERT_WAITING;
+        j->state = MD_JOB_CONVERT_WAITING;
         j->progress = 0;
         if (q.quitting) j->paused = true;
     }
@@ -2594,20 +2597,20 @@ static gpointer dispatcher_thread(gpointer data)
         int downloads = 0, conversions = 0;
         for (guint i = 0; i < q.jobs->len; i++) {
             Job *j = q.jobs->pdata[i];
-            if (j->worker && j->state == ZD_JOB_DOWNLOADING) downloads++;
-            if (j->worker && j->state == ZD_JOB_CONVERTING) conversions++;
+            if (j->worker && j->state == MD_JOB_DOWNLOADING) downloads++;
+            if (j->worker && j->state == MD_JOB_CONVERTING) conversions++;
         }
         bool started = false;
         for (guint i = 0; i < q.jobs->len; i++) {
             Job *j = q.jobs->pdata[i];
             if (j->paused || j->worker) continue;
             GThreadFunc worker = NULL;
-            if (j->state == ZD_JOB_WAITING && downloads < q.max_downloads) {
-                j->state = ZD_JOB_DOWNLOADING;
+            if (j->state == MD_JOB_WAITING && downloads < q.max_downloads) {
+                j->state = MD_JOB_DOWNLOADING;
                 downloads++;
                 worker = download_thread;
-            } else if (j->state == ZD_JOB_CONVERT_WAITING && conversions < q.max_conversions) {
-                j->state = ZD_JOB_CONVERTING;
+            } else if (j->state == MD_JOB_CONVERT_WAITING && conversions < q.max_conversions) {
+                j->state = MD_JOB_CONVERTING;
                 conversions++;
                 worker = convert_thread;
             }
@@ -2627,9 +2630,19 @@ static gpointer dispatcher_thread(gpointer data)
 /* ---------------------------------------------------------------------------
  * Öffentliche Schnittstelle
  * ------------------------------------------------------------------------- */
-void zd_init(bool persist)
+/* Bis Version 1.2 hieß das Programm ZDF-Downloader: Verlauf, Warteschlange und Cache mitnehmen */
+static void adopt_old_app_dir(void)
 {
-    g_app_dir = g_build_filename(g_get_home_dir(), ".zdf-downloader", NULL);
+    char *old = g_build_filename(g_get_home_dir(), OLD_APP_DIR, NULL);
+    if (g_file_test(old, G_FILE_TEST_IS_DIR) && !g_file_test(g_app_dir, G_FILE_TEST_EXISTS))
+        g_rename(old, g_app_dir);
+    g_free(old);
+}
+
+void md_init(bool persist)
+{
+    g_app_dir = g_build_filename(g_get_home_dir(), ".mediathek-downloader", NULL);
+    adopt_old_app_dir();
     g_log_path = g_build_filename(g_app_dir, "protokoll.log", NULL);
     g_mkdir_with_parents(g_app_dir, 0755);
     q.jobs = g_ptr_array_new();
@@ -2641,14 +2654,14 @@ void zd_init(bool persist)
     q.dispatcher = g_thread_new("verteiler", dispatcher_thread, NULL);
 }
 
-void zd_shutdown(void)
+void md_shutdown(void)
 {
     g_mutex_lock(&q.lock);
     q.quitting = true;
     /* Downloads gelten danach als pausiert, damit sie nicht von selbst weiterlaufen */
     for (guint i = 0; i < q.jobs->len; i++) {
         Job *j = q.jobs->pdata[i];
-        if (j->state == ZD_JOB_DOWNLOADING) j->paused = true;
+        if (j->state == MD_JOB_DOWNLOADING) j->paused = true;
     }
     g_cond_broadcast(&q.wake);
     while (q.workers > 0) g_cond_wait(&q.worker_done, &q.lock);
@@ -2657,7 +2670,7 @@ void zd_shutdown(void)
     g_thread_join(q.dispatcher);
 }
 
-bool zd_have_tools(char **missing)
+bool md_have_tools(char **missing)
 {
     const char *tools[] = {"curl", "ffmpeg", "ffprobe"};
     for (size_t i = 0; i < G_N_ELEMENTS(tools); i++) {
@@ -2678,7 +2691,7 @@ static bool label_listed(const char *const *list, const char *label)
     return list && g_strv_contains(list, label);
 }
 
-static Extra *extra_new(bool subtitle, const ZdTrack *track)
+static Extra *extra_new(bool subtitle, const MdTrack *track)
 {
     Extra *e = g_new0(Extra, 1);
     e->subtitle = subtitle;
@@ -2688,13 +2701,13 @@ static Extra *extra_new(bool subtitle, const ZdTrack *track)
     return e;
 }
 
-guint zd_queue_add(const ZdTitle *t, const ZdJobOptions *o)
+guint md_queue_add(const MdTitle *t, const MdJobOptions *o)
 {
-    char *target = zd_target_path(t, o->dir);
+    char *target = md_target_path(t, o->dir);
     g_mutex_lock(&q.lock);
     for (guint i = 0; i < q.jobs->len; i++) {
         Job *other = q.jobs->pdata[i];
-        if (!strcmp(other->target, target) && other->state != ZD_JOB_DONE) {
+        if (!strcmp(other->target, target) && other->state != MD_JOB_DONE) {
             g_mutex_unlock(&q.lock);
             g_free(target);
             return 0;
@@ -2705,28 +2718,28 @@ guint zd_queue_add(const ZdTitle *t, const ZdJobOptions *o)
     j->title = t->season >= 0 ? g_strdup_printf("%s – S%02dE%02d – %s", t->topic, t->season,
                                                 t->episode, t->name)
                               : g_strdup(t->name);
-    j->url = g_strdup(zd_title_url(t, o->quality));
+    j->url = g_strdup(md_title_url(t, o->quality));
     j->target = target;
     j->key = title_key(t);
     j->topic = g_strdup(t->is_film ? "Filme" : t->topic);
     j->season = t->season;
     j->episode = t->episode;
-    const ZdTrack *main_audio = t->audio->pdata[0];
+    const MdTrack *main_audio = t->audio->pdata[0];
     j->main_label = g_strdup(main_audio->label);
     j->main_lang = g_strdup(main_audio->lang);
     /* Ein Titel, der keine der gewählten Sprachen hat, behält seinen Originalton */
     bool other_audio = false;
     for (guint i = 1; i < t->audio->len; i++)
-        other_audio |= !label_listed(o->skip_audio, ((ZdTrack *)t->audio->pdata[i])->label);
+        other_audio |= !label_listed(o->skip_audio, ((MdTrack *)t->audio->pdata[i])->label);
     j->skip_main_audio = other_audio && label_listed(o->skip_audio, main_audio->label);
     j->extras = g_ptr_array_new_with_free_func(extra_free);
     for (guint i = 1; i < t->audio->len; i++) {
-        const ZdTrack *track = t->audio->pdata[i];
+        const MdTrack *track = t->audio->pdata[i];
         if (!label_listed(o->skip_audio, track->label))
             g_ptr_array_add(j->extras, extra_new(false, track));
     }
     for (guint i = 0; i < t->subtitles->len; i++) {
-        const ZdTrack *track = t->subtitles->pdata[i];
+        const MdTrack *track = t->subtitles->pdata[i];
         if (!label_listed(o->skip_subtitles, track->label))
             g_ptr_array_add(j->extras, extra_new(true, track));
     }
@@ -2735,7 +2748,7 @@ guint zd_queue_add(const ZdTitle *t, const ZdJobOptions *o)
     j->encoder = o->encoder;
     j->gpu_quality = o->gpu_quality;
     j->cpu_rf = o->cpu_rf;
-    j->state = ZD_JOB_WAITING;
+    j->state = MD_JOB_WAITING;
     j->remaining = -1;
     g_ptr_array_add(q.jobs, j);
     guint id = j->id;
@@ -2745,13 +2758,13 @@ guint zd_queue_add(const ZdTitle *t, const ZdJobOptions *o)
     return id;
 }
 
-ZdJobView *zd_queue_snapshot(int *count)
+MdJobView *md_queue_snapshot(int *count)
 {
     g_mutex_lock(&q.lock);
-    ZdJobView *views = g_new0(ZdJobView, MAX(q.jobs->len, 1));
+    MdJobView *views = g_new0(MdJobView, MAX(q.jobs->len, 1));
     for (guint i = 0; i < q.jobs->len; i++) {
         Job *j = q.jobs->pdata[i];
-        views[i] = (ZdJobView){j->id, j->state, j->paused, j->merging, g_strdup(j->title),
+        views[i] = (MdJobView){j->id, j->state, j->paused, j->merging, g_strdup(j->title),
                                g_strdup(j->target), g_strdup(j->message), j->have, j->total,
                                j->speed, j->progress, j->remaining};
     }
@@ -2760,7 +2773,7 @@ ZdJobView *zd_queue_snapshot(int *count)
     return views;
 }
 
-void zd_queue_snapshot_free(ZdJobView *views, int count)
+void md_queue_snapshot_free(MdJobView *views, int count)
 {
     for (int i = 0; i < count; i++) {
         g_free(views[i].title);
@@ -2773,12 +2786,12 @@ void zd_queue_snapshot_free(ZdJobView *views, int count)
 /* Pausenzustand eines Auftrags setzen (q.lock gehalten) */
 static void job_set_paused(Job *j, bool paused)
 {
-    if (j->state == ZD_JOB_DONE || j->state == ZD_JOB_FAILED) return;
+    if (j->state == MD_JOB_DONE || j->state == MD_JOB_FAILED) return;
     j->paused = paused;
-    if (paused && j->state == ZD_JOB_DOWNLOADING) j->speed = 0;
+    if (paused && j->state == MD_JOB_DOWNLOADING) j->speed = 0;
 }
 
-void zd_job_set_paused(guint id, bool paused)
+void md_job_set_paused(guint id, bool paused)
 {
     g_mutex_lock(&q.lock);
     Job *j = job_by_id(id);
@@ -2788,7 +2801,7 @@ void zd_job_set_paused(guint id, bool paused)
     g_mutex_unlock(&q.lock);
 }
 
-void zd_queue_set_paused(bool paused)
+void md_queue_set_paused(bool paused)
 {
     g_mutex_lock(&q.lock);
     for (guint i = 0; i < q.jobs->len; i++) job_set_paused(q.jobs->pdata[i], paused);
@@ -2797,12 +2810,12 @@ void zd_queue_set_paused(bool paused)
     g_mutex_unlock(&q.lock);
 }
 
-void zd_job_retry(guint id)
+void md_job_retry(guint id)
 {
     g_mutex_lock(&q.lock);
     Job *j = job_by_id(id);
-    if (j && j->state == ZD_JOB_FAILED) {
-        j->state = ZD_JOB_WAITING;  /* fertige Dateien überspringt der Download von selbst */
+    if (j && j->state == MD_JOB_FAILED) {
+        j->state = MD_JOB_WAITING;  /* fertige Dateien überspringt der Download von selbst */
         j->paused = false;
         g_clear_pointer(&j->message, g_free);
         queue_save();
@@ -2811,7 +2824,7 @@ void zd_job_retry(guint id)
     g_mutex_unlock(&q.lock);
 }
 
-void zd_job_remove(guint id)
+void md_job_remove(guint id)
 {
     g_mutex_lock(&q.lock);
     Job *j = job_by_id(id);
@@ -2826,29 +2839,29 @@ void zd_job_remove(guint id)
     g_mutex_unlock(&q.lock);
 }
 
-void zd_queue_remove_finished(void)
+void md_queue_remove_finished(void)
 {
     g_mutex_lock(&q.lock);
     for (guint i = q.jobs->len; i-- > 0;) {
         Job *j = q.jobs->pdata[i];
-        if (j->state == ZD_JOB_DONE && !j->worker) job_discard(j);
+        if (j->state == MD_JOB_DONE && !j->worker) job_discard(j);
     }
     queue_save();
     g_mutex_unlock(&q.lock);
 }
 
-void zd_set_rate_limit(gint64 bytes_per_second)
+void md_set_rate_limit(gint64 bytes_per_second)
 {
     g_mutex_lock(&q.lock);
     q.rate_limit = MAX(bytes_per_second, 0);
     g_mutex_unlock(&q.lock);
 }
 
-void zd_set_parallel(int downloads, int conversions)
+void md_set_parallel(int downloads, int conversions)
 {
     g_mutex_lock(&q.lock);
-    q.max_downloads = CLAMP(downloads, 1, ZD_MAX_DOWNLOADS);
-    q.max_conversions = CLAMP(conversions, 1, ZD_MAX_CONVERSIONS);
+    q.max_downloads = CLAMP(downloads, 1, MD_MAX_DOWNLOADS);
+    q.max_conversions = CLAMP(conversions, 1, MD_MAX_CONVERSIONS);
     g_cond_signal(&q.wake);
     g_mutex_unlock(&q.lock);
 }

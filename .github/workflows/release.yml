@@ -31,7 +31,7 @@ jobs:
       - name: GitHub-Release anlegen
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" ./*.deb --title "ZDF-Downloader ${GITHUB_REF_NAME#v}" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" ./*.deb --title "Mediathek Downloader ${GITHUB_REF_NAME#v}" --generate-notes
 
       - name: In VPRepo veröffentlichen
         uses: EureLordschaft008/VPRepo/.github/actions/publish@main

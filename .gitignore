@@ -1,5 +1,5 @@
-/zdf-downloader
-/zdf-downloader-cli
+/mediathek-downloader
+/mediathek-downloader-cli
 /build/
 *.deb
 *.mp4

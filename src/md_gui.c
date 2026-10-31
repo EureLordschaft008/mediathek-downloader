@@ -1,6 +1,6 @@
 /*
- * ZDF-Downloader – grafische Oberfläche (GTK 3)
- * =============================================
+ * Mediathek Downloader – grafische Oberfläche (GTK 3)
+ * ===================================================
  * Aufbau und Optik wie beim AV1-Converter. Fünf Seiten, oben umschaltbar:
  *   Vorschau       neue Filme und Serien als Kacheln mit Bild; Häkchen sammeln eine Auswahl
  *   Suche          Treffer als Baum Serie -> Staffel -> Folge; jede Ebene hat ein Häkchen, und
@@ -10,7 +10,7 @@
  *   Einstellungen  Speicherort, Qualität, AV1
  *
  * Suche läuft in einem eigenen Thread, das Ergebnis kommt über g_idle_add() in den
- * GTK-Hauptthread. Die Warteschlange arbeitet in der Engine (zd_core.c); ein Timer holt alle
+ * GTK-Hauptthread. Die Warteschlange arbeitet in der Engine (md_core.c); ein Timer holt alle
  * 500 ms den Stand ab. Der gesamte Zustand der Oberfläche liegt in der Struktur "ui".
  *
  * Aufbau dieser Datei: kleine Helfer – Einstellungen – Trefferbaum – Spurenauswahl –
@@ -18,7 +18,7 @@
  * Fenster, Menü, Programmstart
  *
  * Aufruf:
- *     zdf-downloader
+ *     mediathek-downloader
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -30,10 +30,10 @@
 #include <string.h>
 #include <time.h>
 
-#include "zd_core.h"
+#include "md_core.h"
 
-#define APP_ID "de.zdfdownloader.ZDFDownloader"
-#define APP_NAME "ZDF-Downloader"
+#define APP_ID "de.mediathekdownloader.MediathekDownloader"
+#define APP_NAME "Mediathek Downloader"
 #define SETTINGS_GROUP "Einstellungen"
 #define SETTINGS_FILE "einstellungen.ini"
 #define RESULT_ROWS_BATCH 200   /* Zeilen der Trefferliste auf einmal (weitere per Knopf) */
@@ -50,7 +50,7 @@
 #define FOOTER_COUNT 2
 #define SOURCE_COUNT 3
 
-static const int SOURCE_BITS[SOURCE_COUNT] = {ZD_SOURCE_ZDF, ZD_SOURCE_ARD, ZD_SOURCE_3SAT};
+static const int SOURCE_BITS[SOURCE_COUNT] = {MD_SOURCE_ZDF, MD_SOURCE_ARD, MD_SOURCE_3SAT};
 static const char *const KIND_TEXT[3] = {"Alles", "Filme", "Serien"};
 static const char *const FILTER_TEXT[3] = {"Alle anzeigen", "Nur fehlende", "Nur geladene"};
 static const char *const QUALITY_TEXT[3] = {"Hoch – 1080p (ca. 4,5 GB je 90 min)",
@@ -63,9 +63,9 @@ typedef enum { ROW_GROUP, ROW_SEASON, ROW_ITEM } RowKind;
 
 /* ein Treffer samt Stand */
 typedef struct {
-    ZdTitle *title;
+    MdTitle *title;
     char *path;                 /* vorhandene Datei */
-    ZdStatus status;
+    MdStatus status;
     bool selected;
     bool in_preview;            /* die Vorschau filtert ganze Kacheln, nicht einzelne Folgen */
 } Item;
@@ -84,7 +84,7 @@ typedef struct {
     bool is_film;
     GPtrArray *seasons;         /* Season* */
     bool expanded;
-    int source;                 /* ZD_SOURCE_* */
+    int source;                 /* MD_SOURCE_* */
     /* nur Vorschau */
     char *key, *website, *description, *cover_path;
     gint64 newest;
@@ -93,7 +93,7 @@ typedef struct {
     GdkPixbuf *cover;
     char **genres;              /* Kategorien; NULL = noch nicht bekannt */
     char *fsk;
-    ZdImdbInfo imdb;
+    MdImdbInfo imdb;
     int imdb_state;             /* IMDB_UNKNOWN … */
     GtkWidget *tile_image, *tile_check, *tile_sub, *tile_badges;
 } Group;
@@ -116,7 +116,7 @@ typedef struct {
 /* eine Suche im Hintergrund */
 typedef struct {
     gint cancel;
-    ZdQuery query;
+    MdQuery query;
     char *text, *dir;
     GPtrArray *items;           /* Item* */
     char *error;
@@ -127,7 +127,7 @@ typedef struct {
 typedef struct {
     int min_minutes;
     bool hide_variants;
-    ZdCache cache;
+    MdCache cache;
     char *dir, *error;
     GPtrArray *items;           /* Item* */
 } PreviewJob;
@@ -137,7 +137,7 @@ typedef struct {
     char *key, *topic, *dir, *error;
     int min_minutes, source;
     bool hide_variants;
-    ZdCache cache;
+    MdCache cache;
     GPtrArray *items;           /* Item* */
 } SeriesJob;
 
@@ -146,14 +146,14 @@ typedef struct {
     char *key, *website, *path;
     bool background;            /* nur Kategorien; sichtbare Kacheln gehen vor */
     GdkPixbuf *pixbuf;
-    ZdPageInfo *info;
+    MdPageInfo *info;
 } CoverJob;
 
 /* IMDb-Bewertung im Hintergrund */
 typedef struct {
     char *key, *name;
     bool is_film, found;
-    ZdImdbInfo info;
+    MdImdbInfo info;
 } RatingJob;
 
 /* Zeile der Warteschlange */
@@ -518,7 +518,7 @@ static gboolean on_imdb_done(gpointer data)
 static gpointer imdb_thread(gpointer data)
 {
     ImdbJob *job = data;
-    job->url = zd_imdb_url(job->name, job->is_film);
+    job->url = md_imdb_url(job->name, job->is_film);
     g_idle_add(on_imdb_done, job);
     return NULL;
 }
@@ -596,7 +596,7 @@ static const char CSS[] =
  * ------------------------------------------------------------------------- */
 static char *settings_path(void)
 {
-    return g_build_filename(zd_app_dir(), SETTINGS_FILE, NULL);
+    return g_build_filename(md_app_dir(), SETTINGS_FILE, NULL);
 }
 
 /* Ganzzahl aus der Einstellungsdatei, begrenzt auf lo..hi */
@@ -630,23 +630,30 @@ static void settings_load(void)
     if (!c->dir || !*c->dir) {
         const char *videos = g_get_user_special_dir(G_USER_DIRECTORY_VIDEOS);
         g_free(c->dir);
-        c->dir = g_build_filename(videos ? videos : g_get_home_dir(), "ZDF Mediathek", NULL);
+        c->dir = g_build_filename(videos ? videos : g_get_home_dir(), "Mediathek", NULL);
     }
     c->cache_dir = g_key_file_get_string(file, SETTINGS_GROUP, "Cacheordner", NULL);
+    char *old_dir = g_build_filename(g_get_home_dir(), ".zdf-downloader", NULL);
+    if (c->cache_dir && g_str_has_prefix(c->cache_dir, old_dir)) {   /* umgezogen, siehe md_init */
+        char *moved = g_strconcat(md_app_dir(), c->cache_dir + strlen(old_dir), NULL);
+        g_free(c->cache_dir);
+        c->cache_dir = moved;
+    }
+    g_free(old_dir);
     if (!c->cache_dir || !*c->cache_dir) {
         g_free(c->cache_dir);
-        c->cache_dir = zd_default_cover_dir();
+        c->cache_dir = md_default_cover_dir();
     }
-    c->quality = settings_int(file, "Qualitaet", ZD_QUALITY_HIGH, 0, 2);
-    c->encoder = settings_int(file, "Encoder", ZD_ENCODER_GPU, 0, 1);
-    c->gpu_quality = settings_int(file, "GpuQualitaet", ZD_DEFAULT_GPU_QUALITY, 1, 255);
-    c->cpu_rf = settings_int(file, "CpuRf", ZD_DEFAULT_CPU_RF, 1, 63);
-    c->parallel = settings_int(file, "Downloads", 2, 1, ZD_MAX_DOWNLOADS);
-    c->conversions = settings_int(file, "Umwandlungen", 1, 1, ZD_MAX_CONVERSIONS);
+    c->quality = settings_int(file, "Qualitaet", MD_QUALITY_HIGH, 0, 2);
+    c->encoder = settings_int(file, "Encoder", MD_ENCODER_GPU, 0, 1);
+    c->gpu_quality = settings_int(file, "GpuQualitaet", MD_DEFAULT_GPU_QUALITY, 1, 255);
+    c->cpu_rf = settings_int(file, "CpuRf", MD_DEFAULT_CPU_RF, 1, 63);
+    c->parallel = settings_int(file, "Downloads", 2, 1, MD_MAX_DOWNLOADS);
+    c->conversions = settings_int(file, "Umwandlungen", 1, 1, MD_MAX_CONVERSIONS);
     c->min_minutes = settings_int(file, "Mindestlaenge", 10, 0, 300);
     c->limit_mb = CLAMP(settings_int(file, "LimitMBs", 10, 1, 1000), 1, 1000);
     c->limit_on = settings_bool(file, "LimitAktiv", false);
-    c->sources = settings_int(file, "Mediatheken", ZD_SOURCE_ALL, 1, ZD_SOURCE_ALL);
+    c->sources = settings_int(file, "Mediatheken", MD_SOURCE_ALL, 1, MD_SOURCE_ALL);
     c->convert = settings_bool(file, "AV1", false);
     c->keep_original = settings_bool(file, "OriginalBehalten", false);
     c->show_signed = settings_bool(file, "Gebaerdensprache", false);
@@ -680,7 +687,7 @@ static void settings_save(void)
     g_key_file_set_integer(file, SETTINGS_GROUP, "Hoehe", c->height);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "Maximiert", c->maximized);
     char *path = settings_path();
-    if (!g_key_file_save_to_file(file, path, NULL)) zd_log("Einstellungen nicht gespeichert");
+    if (!g_key_file_save_to_file(file, path, NULL)) md_log("Einstellungen nicht gespeichert");
     g_free(path);
     g_key_file_free(file);
 }
@@ -688,9 +695,9 @@ static void settings_save(void)
 /* Tempolimit und Parallelität an die Engine geben */
 static void apply_queue_settings(void)
 {
-    zd_set_rate_limit(ui.cfg.limit_on ? (gint64)(ui.cfg.limit_mb * 1e6) : 0);
-    zd_set_parallel(ui.cfg.parallel, ui.cfg.conversions);
-    zd_set_cover_dir(ui.cfg.cache_dir);
+    md_set_rate_limit(ui.cfg.limit_on ? (gint64)(ui.cfg.limit_mb * 1e6) : 0);
+    md_set_parallel(ui.cfg.parallel, ui.cfg.conversions);
+    md_set_cover_dir(ui.cfg.cache_dir);
 }
 
 /* ---------------------------------------------------------------------------
@@ -699,7 +706,7 @@ static void apply_queue_settings(void)
 static void item_free(gpointer data)
 {
     Item *item = data;
-    zd_title_free(item->title);
+    md_title_free(item->title);
     g_free(item->path);
     g_free(item);
 }
@@ -729,7 +736,7 @@ static void group_free(gpointer data)
 /* lässt sich dieser Treffer auswählen? */
 static bool item_open(const Item *item)
 {
-    return item->status != ZD_STATUS_DONE && item->status != ZD_STATUS_QUEUED;
+    return item->status != MD_STATUS_DONE && item->status != MD_STATUS_QUEUED;
 }
 
 /* passt der Treffer zum Filter "Anzeigen"? */
@@ -738,7 +745,7 @@ static bool item_visible(const Item *item)
     if (item->in_preview) return true;
     int filter = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.filter_combo));
     if (filter == FILTER_MISSING) return item_open(item);
-    if (filter == FILTER_DONE) return item->status == ZD_STATUS_DONE;
+    if (filter == FILTER_DONE) return item->status == MD_STATUS_DONE;
     return true;
 }
 
@@ -754,8 +761,8 @@ static void counts_add_season(Counts *c, const Season *season)
         c->total++;
         c->visible += item_visible(item);
         c->open += item_open(item);
-        c->done += item->status == ZD_STATUS_DONE;
-        c->queued += item->status == ZD_STATUS_QUEUED;
+        c->done += item->status == MD_STATUS_DONE;
+        c->queued += item->status == MD_STATUS_QUEUED;
         c->selected += item->selected;
     }
 }
@@ -783,7 +790,7 @@ static void group_select(Group *group, bool selected)
 /* Reihenfolge innerhalb einer Staffel */
 static int compare_items(gconstpointer a, gconstpointer b)
 {
-    const ZdTitle *x = (*(Item *const *)a)->title, *y = (*(Item *const *)b)->title;
+    const MdTitle *x = (*(Item *const *)a)->title, *y = (*(Item *const *)b)->title;
     if (x->episode != y->episode) return x->episode - y->episode;
     return x->timestamp < y->timestamp ? 1 : x->timestamp > y->timestamp ? -1 : 0;
 }
@@ -822,7 +829,7 @@ static GPtrArray *group_items(GPtrArray *items)
     GHashTable *by_name = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint i = 0; i < items->len; i++) {
         Item *item = items->pdata[i];
-        const ZdTitle *t = item->title;
+        const MdTitle *t = item->title;
         const char *name = t->is_film ? t->name : t->topic;
         char *key = g_strdup_printf("%d:%c:%s", t->source, t->is_film ? 'F' : 'S', name);
         Group *group = g_hash_table_lookup(by_name, key);
@@ -873,13 +880,13 @@ static void build_groups(GPtrArray *items)
 }
 
 /* Marke zum Stand eines Treffers */
-static GtkWidget *status_badge(ZdStatus status)
+static GtkWidget *status_badge(MdStatus status)
 {
     switch (status) {
-    case ZD_STATUS_DONE: return new_badge("Geladen", "ok");
-    case ZD_STATUS_QUEUED: return new_badge("In Warteschlange", NULL);
-    case ZD_STATUS_PARTIAL: return new_badge("Angefangen", "warn");
-    case ZD_STATUS_GONE: return new_badge("Datei fehlt", "err");
+    case MD_STATUS_DONE: return new_badge("Geladen", "ok");
+    case MD_STATUS_QUEUED: return new_badge("In Warteschlange", NULL);
+    case MD_STATUS_PARTIAL: return new_badge("Angefangen", "warn");
+    case MD_STATUS_GONE: return new_badge("Datei fehlt", "err");
     default: return NULL;
     }
 }
@@ -1004,11 +1011,11 @@ static void add_result_row(ResultTree *tree, RowRef *ref, const char *title, con
 }
 
 /* Beschreibung einer Folge oder eines Films */
-static char *item_subtitle(const ZdTitle *t)
+static char *item_subtitle(const MdTitle *t)
 {
     char *date = format_date(t->timestamp);
-    char *size = zd_format_size((double)zd_title_estimate(t, ui.cfg.quality));
-    GString *s = g_string_new(zd_source_label(t->source));
+    char *size = md_format_size((double)md_title_estimate(t, ui.cfg.quality));
+    GString *s = g_string_new(md_source_label(t->source));
     g_string_append(s, " · ");
     if (t->season >= 0) g_string_append_printf(s, "S%02dE%02d · ", t->season, t->episode);
     g_string_append_printf(s, "%d min · %s · ca. %s", t->duration / 60, date, size);
@@ -1016,7 +1023,7 @@ static char *item_subtitle(const ZdTitle *t)
         g_string_append(s, " · ");
         for (guint i = 0; i < t->audio->len; i++)
             g_string_append_printf(s, "%s%s", i ? ", " : "",
-                                   ((ZdTrack *)t->audio->pdata[i])->label);
+                                   ((MdTrack *)t->audio->pdata[i])->label);
         if (t->subtitles->len) g_string_append(s, " · Untertitel");
     }
     g_free(date);
@@ -1092,7 +1099,7 @@ static void add_group_row(ResultTree *tree, Group *group)
         for (guint n = 0; n < season->items->len; n++)
             seconds += ((Item *)season->items->pdata[n])->title->duration;
     }
-    char *time_text = zd_format_time(seconds);
+    char *time_text = md_format_time(seconds);
     char *subtitle;
     if (seasons)
         subtitle = g_strdup_printf("%d %s · %d %s · %s", c.total,
@@ -1205,7 +1212,7 @@ static bool refresh_groups(GPtrArray *groups)
             for (guint i = 0; i < season->items->len; i++) {
                 Item *item = season->items->pdata[i];
                 char *path = NULL;
-                ZdStatus status = zd_title_status(item->title, ui.cfg.dir, &path);
+                MdStatus status = md_title_status(item->title, ui.cfg.dir, &path);
                 changed |= status != item->status || g_strcmp0(path, item->path);
                 item->status = status;
                 g_free(item->path);
@@ -1234,7 +1241,7 @@ static void collect_from(GPtrArray *out, GHashTable *seen, GPtrArray *groups)
             for (guint i = 0; i < season->items->len; i++) {
                 Item *item = season->items->pdata[i];
                 if (item->selected &&
-                    g_hash_table_add(seen, (char *)zd_title_url(item->title, ZD_QUALITY_HIGH)))
+                    g_hash_table_add(seen, (char *)md_title_url(item->title, MD_QUALITY_HIGH)))
                     g_ptr_array_add(out, item);
             }
         }
@@ -1268,8 +1275,8 @@ static void update_selection(void)
     GPtrArray *selected = collect_selected();
     gint64 bytes = 0;
     for (guint i = 0; i < selected->len; i++)
-        bytes += zd_title_estimate(((Item *)selected->pdata[i])->title, ui.cfg.quality);
-    char *size = zd_format_size((double)bytes);
+        bytes += md_title_estimate(((Item *)selected->pdata[i])->title, ui.cfg.quality);
+    char *size = md_format_size((double)bytes);
     char *text = ui.series_loading ? g_strdup("Folgen werden geladen …")
                  : selected->len ? g_strdup_printf("%u ausgewählt · ca. %s", selected->len, size)
                                  : g_strdup("Nichts ausgewählt");
@@ -1295,7 +1302,7 @@ static void update_selection(void)
 static void add_labels(GPtrArray *labels, GPtrArray *tracks)
 {
     for (guint i = 0; i < tracks->len; i++) {
-        const char *label = ((ZdTrack *)tracks->pdata[i])->label;
+        const char *label = ((MdTrack *)tracks->pdata[i])->label;
         bool known = false;
         for (guint n = 0; n < labels->len; n++) known |= !strcmp(labels->pdata[n], label);
         if (!known) g_ptr_array_add(labels, (char *)label);
@@ -1343,7 +1350,7 @@ static bool ask_tracks(GPtrArray *selected, char ***skip_audio, char ***skip_sub
 {
     GPtrArray *audio = g_ptr_array_new(), *subtitles = g_ptr_array_new();
     for (guint i = 0; i < selected->len; i++) {
-        const ZdTitle *t = ((Item *)selected->pdata[i])->title;
+        const MdTitle *t = ((Item *)selected->pdata[i])->title;
         add_labels(audio, t->audio);
         add_labels(subtitles, t->subtitles);
     }
@@ -1442,7 +1449,7 @@ static void add_items(GPtrArray *items, GPtrArray *titles, const char *dir)
     for (guint i = 0; i < titles->len; i++) {
         Item *item = g_new0(Item, 1);
         item->title = titles->pdata[i];
-        item->status = zd_title_status(item->title, dir, &item->path);
+        item->status = md_title_status(item->title, dir, &item->path);
         g_ptr_array_add(items, item);
     }
     g_ptr_array_set_free_func(titles, NULL);
@@ -1453,7 +1460,7 @@ static void add_items(GPtrArray *items, GPtrArray *titles, const char *dir)
 static gpointer search_thread(gpointer data)
 {
     SearchJob *job = data;
-    GPtrArray *titles = zd_search(&job->query, &job->cancel, &job->truncated, &job->error);
+    GPtrArray *titles = md_search(&job->query, &job->cancel, &job->truncated, &job->error);
     if (titles) {
         job->items = g_ptr_array_new_with_free_func(item_free);
         add_items(job->items, titles, job->dir);
@@ -1477,7 +1484,7 @@ static void start_search(void)
     g_strstrip(job->text);
     job->dir = g_strdup(ui.cfg.dir);
     job->query.text = job->text;
-    job->query.kind = (ZdKind)gtk_combo_box_get_active(GTK_COMBO_BOX(ui.kind_combo));
+    job->query.kind = (MdKind)gtk_combo_box_get_active(GTK_COMBO_BOX(ui.kind_combo));
     job->query.sources = ui.cfg.sources;
     job->query.min_minutes = ui.cfg.min_minutes;
     job->query.hide_variants = !ui.cfg.show_signed;
@@ -1536,15 +1543,15 @@ static void on_download_clicked(GtkButton *b, gpointer d)
         g_ptr_array_free(selected, TRUE);
         return;
     }
-    ZdJobOptions options = {.dir = ui.cfg.dir, .quality = (ZdQuality)ui.cfg.quality,
-                            .convert = ui.cfg.convert, .encoder = (ZdEncoder)ui.cfg.encoder,
+    MdJobOptions options = {.dir = ui.cfg.dir, .quality = (MdQuality)ui.cfg.quality,
+                            .convert = ui.cfg.convert, .encoder = (MdEncoder)ui.cfg.encoder,
                             .gpu_quality = ui.cfg.gpu_quality, .cpu_rf = ui.cfg.cpu_rf,
                             .keep_original = ui.cfg.keep_original,
                             .skip_audio = (const char *const *)skip_audio,
                             .skip_subtitles = (const char *const *)skip_subtitles};
     for (guint i = 0; i < selected->len; i++) {
         Item *item = selected->pdata[i];
-        zd_queue_add(item->title, &options);
+        md_queue_add(item->title, &options);
         item->selected = false;
     }
     g_strfreev(skip_audio);
@@ -1562,10 +1569,10 @@ static void sync_source_buttons(void)
     for (int page = 0; page < FOOTER_COUNT; page++) {
         for (int i = 0; i < SOURCE_COUNT; i++)
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.source_buttons[page][i]),
-                                         ui.cfg.sources != ZD_SOURCE_ALL &&
+                                         ui.cfg.sources != MD_SOURCE_ALL &&
                                          (ui.cfg.sources & SOURCE_BITS[i]));
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui.source_buttons[page][SOURCE_COUNT]),
-                                     ui.cfg.sources == ZD_SOURCE_ALL);
+                                     ui.cfg.sources == MD_SOURCE_ALL);
     }
     ui.updating_chips = false;
 }
@@ -1577,8 +1584,8 @@ static void on_source_toggled(GtkToggleButton *b, gpointer d)
     (void)b;
     if (ui.updating_chips) return;
     int bit = GPOINTER_TO_INT(d);
-    if (bit == ZD_SOURCE_ALL) ui.cfg.sources = ZD_SOURCE_ALL;
-    else if (ui.cfg.sources == ZD_SOURCE_ALL) ui.cfg.sources = bit;
+    if (bit == MD_SOURCE_ALL) ui.cfg.sources = MD_SOURCE_ALL;
+    else if (ui.cfg.sources == MD_SOURCE_ALL) ui.cfg.sources = bit;
     else if (ui.cfg.sources != bit) ui.cfg.sources ^= bit;
     sync_source_buttons();
     settings_save();
@@ -1600,8 +1607,8 @@ static GtkWidget *build_source_bar(int page)
     gtk_widget_set_margin_end(label, 6);
     gtk_box_pack_start(GTK_BOX(bar), label, FALSE, FALSE, 0);
     for (int i = 0; i <= SOURCE_COUNT; i++) {
-        int bit = i < SOURCE_COUNT ? SOURCE_BITS[i] : ZD_SOURCE_ALL;
-        GtkWidget *b = gtk_toggle_button_new_with_label(i < SOURCE_COUNT ? zd_source_label(bit)
+        int bit = i < SOURCE_COUNT ? SOURCE_BITS[i] : MD_SOURCE_ALL;
+        GtkWidget *b = gtk_toggle_button_new_with_label(i < SOURCE_COUNT ? md_source_label(bit)
                                                                          : "Alle");
         add_css_class(b, "zd-chip");
         g_signal_connect(b, "toggled", G_CALLBACK(on_source_toggled), GINT_TO_POINTER(bit));
@@ -1648,7 +1655,7 @@ static GtkWidget *build_search_page(void)
     gtk_widget_set_hexpand(ui.search_entry, TRUE);
     g_signal_connect(ui.search_entry, "activate", G_CALLBACK(on_search_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.search_entry, TRUE, TRUE, 0);
-    ui.kind_combo = new_combo(KIND_TEXT, 3, ZD_KIND_ALL);
+    ui.kind_combo = new_combo(KIND_TEXT, 3, MD_KIND_ALL);
     gtk_box_pack_start(GTK_BOX(bar), ui.kind_combo, FALSE, FALSE, 0);
     ui.search_spinner = gtk_spinner_new();
     gtk_box_pack_start(GTK_BOX(bar), ui.search_spinner, FALSE, FALSE, 0);
@@ -1716,7 +1723,7 @@ static gboolean on_cover_done(gpointer data)
         ui.genres_dirty = true;
     }
     if (job->background && --ui.genre_pending == 0) ui.genres_dirty = true;
-    zd_page_info_free(job->info);
+    md_page_info_free(job->info);
     g_clear_object(&job->pixbuf);
     g_free(job->key);
     g_free(job->website);
@@ -1729,8 +1736,8 @@ static void cover_worker(gpointer data, gpointer d)
 {
     (void)d;
     CoverJob *job = data;
-    job->info = zd_page_info(job->website);
-    if (!job->background) job->path = zd_cover_file(job->website);
+    job->info = md_page_info(job->website);
+    if (!job->background) job->path = md_cover_file(job->website);
     if (job->path)
         job->pixbuf = gdk_pixbuf_new_from_file_at_scale(job->path, COVER_WIDTH, COVER_HEIGHT,
                                                         FALSE, NULL);
@@ -1784,7 +1791,7 @@ static char *group_meta(const Group *group, bool short_form)
             seconds += ((Item *)season->items->pdata[n])->title->duration;
     }
     GString *s = g_string_new(NULL);
-    if (!short_form) g_string_append_printf(s, "%s · ", zd_source_label(group->source));
+    if (!short_form) g_string_append_printf(s, "%s · ", md_source_label(group->source));
     if (group->fsk) g_string_append_printf(s, "%s · ", group->fsk);
     char *date = format_date(group->newest);
     if (group->is_film) {
@@ -1792,7 +1799,7 @@ static char *group_meta(const Group *group, bool short_form)
     } else if (group->complete && short_form) {
         g_string_append_printf(s, "%d %s · %s", c.total, plural(c.total, "Folge", "Folgen"), date);
     } else if (group->complete) {
-        char *total = zd_format_time(seconds);
+        char *total = md_format_time(seconds);
         g_string_append_printf(s, "%d %s · %d %s · insgesamt %s · neueste Folge %s", c.total,
                                plural(c.total, "Folge", "Folgen"), seasons,
                                plural(seasons, "Staffel", "Staffeln"), total, date);
@@ -1854,7 +1861,7 @@ static gboolean on_rating_done(gpointer data)
 static gpointer rating_thread(gpointer data)
 {
     RatingJob *job = data;
-    job->found = zd_imdb_info(job->name, job->is_film, &job->info);
+    job->found = md_imdb_info(job->name, job->is_film, &job->info);
     g_idle_add(on_rating_done, job);
     return NULL;
 }
@@ -1961,14 +1968,14 @@ static gboolean on_series_done(gpointer data)
 static gpointer series_thread(gpointer data)
 {
     SeriesJob *job = data;
-    ZdQuery query = {.text = job->topic, .kind = ZD_KIND_ALL, .sources = job->source,
+    MdQuery query = {.text = job->topic, .kind = MD_KIND_ALL, .sources = job->source,
                      .min_minutes = job->min_minutes,
                      .hide_variants = job->hide_variants, .cache = job->cache};
-    GPtrArray *titles = zd_search(&query, NULL, NULL, &job->error);
+    GPtrArray *titles = md_search(&query, NULL, NULL, &job->error);
     if (titles) {
         /* die Suche findet das Wort auch in fremden Sendungen */
         for (guint i = titles->len; i-- > 0;)
-            if (strcmp(((ZdTitle *)titles->pdata[i])->topic, job->topic))
+            if (strcmp(((MdTitle *)titles->pdata[i])->topic, job->topic))
                 g_ptr_array_remove_index(titles, i);
         job->items = g_ptr_array_new_with_free_func(item_free);
         add_items(job->items, titles, job->dir);
@@ -1989,7 +1996,7 @@ static void load_series(Group *group)
     job->dir = g_strdup(ui.cfg.dir);
     job->min_minutes = ui.cfg.min_minutes;
     job->hide_variants = !ui.cfg.show_signed;
-    job->cache = ui.preview_refreshed ? ZD_CACHE_REFRESH : ZD_CACHE_USE;
+    job->cache = ui.preview_refreshed ? MD_CACHE_REFRESH : MD_CACHE_USE;
     g_thread_unref(g_thread_new("serie", series_thread, job));
 }
 
@@ -2216,7 +2223,7 @@ static void add_tile(GtkWidget *box, Group *group)
     gtk_widget_set_valign(source_box, GTK_ALIGN_START);
     gtk_widget_set_margin_end(source_box, 6);
     gtk_widget_set_margin_top(source_box, 6);
-    gtk_box_pack_start(GTK_BOX(source_box), new_badge(zd_source_label(group->source), NULL),
+    gtk_box_pack_start(GTK_BOX(source_box), new_badge(md_source_label(group->source), NULL),
                        FALSE, FALSE, 0);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), source_box);
     group->tile_badges = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -2266,8 +2273,8 @@ static bool tile_matches(const Group *group, const char *filter)
     if (status == FILTER_MISSING && !c.open) return false;
     if (status == FILTER_DONE && !c.done) return false;
     if (!(group->source & ui.cfg.sources)) return false;
-    if (kind == ZD_KIND_FILMS && !group->is_film) return false;
-    if (kind == ZD_KIND_SERIES && group->is_film) return false;
+    if (kind == MD_KIND_FILMS && !group->is_film) return false;
+    if (kind == MD_KIND_SERIES && group->is_film) return false;
     if (ui.active_genre && !(group->genres && g_strv_contains((const char *const *)group->genres,
                                                               ui.active_genre)))
         return false;
@@ -2311,10 +2318,10 @@ static void rebuild_preview(void)
     gtk_widget_set_visible(ui.film_more, films > ui.film_limit);
     gtk_widget_set_visible(ui.series_more, series > ui.series_limit);
     int kind = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.preview_kind));
-    gtk_widget_set_visible(ui.film_title, kind != ZD_KIND_SERIES);
-    gtk_widget_set_visible(ui.film_box, kind != ZD_KIND_SERIES);
-    gtk_widget_set_visible(ui.series_title, kind != ZD_KIND_FILMS);
-    gtk_widget_set_visible(ui.series_box, kind != ZD_KIND_FILMS);
+    gtk_widget_set_visible(ui.film_title, kind != MD_KIND_SERIES);
+    gtk_widget_set_visible(ui.film_box, kind != MD_KIND_SERIES);
+    gtk_widget_set_visible(ui.series_title, kind != MD_KIND_FILMS);
+    gtk_widget_set_visible(ui.series_box, kind != MD_KIND_FILMS);
     gtk_widget_show_all(ui.film_box);
     gtk_widget_show_all(ui.series_box);
     update_checks();
@@ -2494,14 +2501,14 @@ static gboolean on_preview_done(gpointer data)
 static gpointer preview_thread(gpointer data)
 {
     PreviewJob *job = data;
-    ZdQuery films = {.text = "", .kind = ZD_KIND_FILMS, .hide_variants = job->hide_variants,
+    MdQuery films = {.text = "", .kind = MD_KIND_FILMS, .hide_variants = job->hide_variants,
                      .min_minutes = MAX(job->min_minutes, PREVIEW_FILM_MIN_MINUTES),
-                     .sources = ZD_SOURCE_ALL, .cache = job->cache};
-    ZdQuery series = {.text = "", .kind = ZD_KIND_SERIES, .hide_variants = job->hide_variants,
-                      .min_minutes = job->min_minutes, .sources = ZD_SOURCE_ALL,
+                     .sources = MD_SOURCE_ALL, .cache = job->cache};
+    MdQuery series = {.text = "", .kind = MD_KIND_SERIES, .hide_variants = job->hide_variants,
+                      .min_minutes = job->min_minutes, .sources = MD_SOURCE_ALL,
                       .cache = job->cache};
-    GPtrArray *titles = zd_search(&films, NULL, NULL, &job->error);
-    GPtrArray *more = titles ? zd_search(&series, NULL, NULL, &job->error) : NULL;
+    GPtrArray *titles = md_search(&films, NULL, NULL, &job->error);
+    GPtrArray *more = titles ? md_search(&series, NULL, NULL, &job->error) : NULL;
     if (more) {
         job->items = g_ptr_array_new_with_free_func(item_free);
         add_items(job->items, titles, job->dir);
@@ -2513,11 +2520,11 @@ static gpointer preview_thread(gpointer data)
     return NULL;
 }
 
-static void start_preview_load(ZdCache cache)
+static void start_preview_load(MdCache cache)
 {
     if (ui.preview_busy) return;
     ui.preview_busy = true;
-    ui.preview_refreshed = cache == ZD_CACHE_REFRESH;
+    ui.preview_refreshed = cache == MD_CACHE_REFRESH;
     PreviewJob *job = g_new0(PreviewJob, 1);
     job->cache = cache;
     job->dir = g_strdup(ui.cfg.dir);
@@ -2543,7 +2550,7 @@ static void on_preview_refresh_clicked(GtkButton *b, gpointer d)
     if (!any || ask_confirmation("Vorschau neu laden?",
                                  "Die Auswahl in der Vorschau geht verloren.", "Behalten",
                                  "Neu laden", false))
-        start_preview_load(ZD_CACHE_REFRESH);
+        start_preview_load(MD_CACHE_REFRESH);
 }
 
 /* ein Abschnitt: Überschrift, Kacheln, "Weitere anzeigen" */
@@ -2580,7 +2587,7 @@ static GtkWidget *build_preview_page(void)
     g_signal_connect(ui.preview_search, "search-changed", G_CALLBACK(on_preview_filter_changed),
                      NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.preview_search, TRUE, TRUE, 0);
-    ui.preview_kind = new_combo(KIND_TEXT, 3, ZD_KIND_ALL);
+    ui.preview_kind = new_combo(KIND_TEXT, 3, MD_KIND_ALL);
     g_signal_connect(ui.preview_kind, "changed", G_CALLBACK(on_preview_filter_changed), NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.preview_kind, FALSE, FALSE, 0);
     ui.preview_filter = new_combo(FILTER_TEXT, 3, FILTER_ALL);
@@ -2636,13 +2643,13 @@ static void on_job_pause_clicked(GtkButton *b, gpointer d)
 {
     JobRow *row = d;
     bool paused = g_object_get_data(G_OBJECT(b), "paused") != NULL;
-    zd_job_set_paused(row->id, !paused);
+    md_job_set_paused(row->id, !paused);
 }
 
 static void on_job_retry_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
-    zd_job_retry(((JobRow *)d)->id);
+    md_job_retry(((JobRow *)d)->id);
 }
 
 static void on_job_remove_clicked(GtkButton *b, gpointer d)
@@ -2653,7 +2660,7 @@ static void on_job_remove_clicked(GtkButton *b, gpointer d)
         !ask_confirmation("Download abbrechen?", "Der bisher geladene Teil wird gelöscht.",
                           "Behalten", "Abbrechen und löschen", true))
         return;
-    zd_job_remove(row->id);
+    md_job_remove(row->id);
 }
 
 static void on_job_open_clicked(GtkButton *b, gpointer d)
@@ -2663,7 +2670,7 @@ static void on_job_open_clicked(GtkButton *b, gpointer d)
 }
 
 /* Zeile der Warteschlange anlegen */
-static JobRow *new_job_row(const ZdJobView *j)
+static JobRow *new_job_row(const MdJobView *j)
 {
     JobRow *row = g_new0(JobRow, 1);
     row->id = j->id;
@@ -2710,37 +2717,37 @@ static JobRow *new_job_row(const ZdJobView *j)
 }
 
 /* Statuszeile eines Auftrags */
-static char *job_status_text(const ZdJobView *j)
+static char *job_status_text(const MdJobView *j)
 {
-    char *have = zd_format_size((double)j->have), *total = zd_format_size((double)j->total);
-    char *speed = zd_format_size(j->speed);
-    char *rest = j->remaining >= 0 ? zd_format_time(j->remaining) : g_strdup("?");
+    char *have = md_format_size((double)j->have), *total = md_format_size((double)j->total);
+    char *speed = md_format_size(j->speed);
+    char *rest = j->remaining >= 0 ? md_format_time(j->remaining) : g_strdup("?");
     char *text = NULL;
     switch (j->state) {
-    case ZD_JOB_WAITING:
+    case MD_JOB_WAITING:
         if (j->total > 0 && j->paused)
             text = g_strdup_printf("Pausiert · %s von %s", have, total);
         else text = g_strdup(j->paused ? "Pausiert" : "Wartet");
         break;
-    case ZD_JOB_DOWNLOADING:
+    case MD_JOB_DOWNLOADING:
         if (j->paused) text = g_strdup("Wird pausiert …");
         else if (j->total > 0)
             text = g_strdup_printf("%s von %s · %s/s · noch %s", have, total, speed, rest);
         else text = g_strdup("Verbindet …");
         break;
-    case ZD_JOB_CONVERT_WAITING:
+    case MD_JOB_CONVERT_WAITING:
         text = g_strdup(j->paused ? "Download fertig · Weiterverarbeitung pausiert"
                                   : "Download fertig · wartet auf die Weiterverarbeitung");
         break;
-    case ZD_JOB_CONVERTING:
+    case MD_JOB_CONVERTING:
         text = g_strdup_printf("%s · %.0f %% · noch %s%s",
                                j->merging ? "Spuren zusammenführen" : "Umwandlung nach AV1",
                                j->progress * 100, rest, j->paused ? " · pausiert" : "");
         break;
-    case ZD_JOB_DONE:
+    case MD_JOB_DONE:
         text = g_strdup(j->message ? j->message : "Fertig");
         break;
-    case ZD_JOB_FAILED:
+    case MD_JOB_FAILED:
         text = g_strdup(j->message ? j->message : "Fehlgeschlagen");
         break;
     }
@@ -2752,9 +2759,9 @@ static char *job_status_text(const ZdJobView *j)
 }
 
 /* Zeile auf den aktuellen Stand bringen */
-static void job_row_update(JobRow *row, const ZdJobView *j)
+static void job_row_update(JobRow *row, const MdJobView *j)
 {
-    bool done = j->state == ZD_JOB_DONE, failed = j->state == ZD_JOB_FAILED;
+    bool done = j->state == MD_JOB_DONE, failed = j->state == MD_JOB_FAILED;
     bool open = !done && !failed;
     char *status = job_status_text(j);
     set_label_text(row->subtitle, status);
@@ -2777,19 +2784,19 @@ static void job_row_update(JobRow *row, const ZdJobView *j)
 }
 
 /* Kopfzeile: was läuft gerade? */
-static void update_downloads_hero(const ZdJobView *jobs, int count)
+static void update_downloads_hero(const MdJobView *jobs, int count)
 {
     int active = 0, open = 0, paused = 0, failed = 0, done = 0;
     double speed = 0, remaining = 0;
     for (int i = 0; i < count; i++) {
-        const ZdJobView *j = &jobs[i];
-        done += j->state == ZD_JOB_DONE;
-        failed += j->state == ZD_JOB_FAILED;
-        if (j->state == ZD_JOB_DONE || j->state == ZD_JOB_FAILED) continue;
+        const MdJobView *j = &jobs[i];
+        done += j->state == MD_JOB_DONE;
+        failed += j->state == MD_JOB_FAILED;
+        if (j->state == MD_JOB_DONE || j->state == MD_JOB_FAILED) continue;
         open++;
         if (j->paused) paused++;
-        else if (j->state == ZD_JOB_DOWNLOADING || j->state == ZD_JOB_CONVERTING) active++;
-        if (j->state == ZD_JOB_DOWNLOADING) {
+        else if (j->state == MD_JOB_DOWNLOADING || j->state == MD_JOB_CONVERTING) active++;
+        if (j->state == MD_JOB_DOWNLOADING) {
             speed += j->speed;
             remaining = MAX(remaining, j->remaining);
         }
@@ -2805,7 +2812,7 @@ static void update_downloads_hero(const ZdJobView *jobs, int count)
 
     GString *sub = g_string_new(NULL);
     if (speed > 0) {
-        char *text = zd_format_size(speed), *rest = zd_format_time(remaining);
+        char *text = md_format_size(speed), *rest = md_format_time(remaining);
         g_string_append_printf(sub, "%s/s · noch %s · ", text, rest);
         g_free(text);
         g_free(rest);
@@ -2823,7 +2830,7 @@ static void update_downloads_hero(const ZdJobView *jobs, int count)
     if (active && !ui.inhibit_cookie)
         ui.inhibit_cookie = gtk_application_inhibit(ui.app, GTK_WINDOW(ui.win),
                                                     GTK_APPLICATION_INHIBIT_SUSPEND,
-                                                    "ZDF-Downloader arbeitet");
+                                                    "Mediathek Downloader arbeitet");
     if (!active && ui.inhibit_cookie) {
         gtk_application_uninhibit(ui.app, ui.inhibit_cookie);
         ui.inhibit_cookie = 0;
@@ -2849,10 +2856,10 @@ static gboolean on_tick(gpointer d)
 {
     (void)d;
     int count = 0;
-    ZdJobView *jobs = zd_queue_snapshot(&count);
+    MdJobView *jobs = md_queue_snapshot(&count);
     GString *mark = g_string_new(NULL);
     for (int i = 0; i < count; i++) {
-        const ZdJobView *j = &jobs[i];
+        const MdJobView *j = &jobs[i];
         JobRow *row = g_hash_table_lookup(ui.job_rows, GUINT_TO_POINTER(j->id));
         if (!row) {
             row = new_job_row(j);
@@ -2860,12 +2867,12 @@ static gboolean on_tick(gpointer d)
         }
         row->seen = true;
         job_row_update(row, j);
-        g_string_append_printf(mark, "%u:%d,", j->id, j->state >= ZD_JOB_DONE ? j->state : 0);
+        g_string_append_printf(mark, "%u:%d,", j->id, j->state >= MD_JOB_DONE ? j->state : 0);
     }
     g_hash_table_foreach_remove(ui.job_rows, job_row_stale, NULL);
     gtk_widget_set_visible(ui.jobs_empty, count == 0);
     update_downloads_hero(jobs, count);
-    zd_queue_snapshot_free(jobs, count);
+    md_queue_snapshot_free(jobs, count);
     if (g_strcmp0(mark->str, ui.fingerprint)) {
         g_free(ui.fingerprint);
         ui.fingerprint = g_strdup(mark->str);
@@ -2881,14 +2888,14 @@ static void on_pause_all_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
     (void)d;
-    zd_queue_set_paused(true);
+    md_queue_set_paused(true);
 }
 
 static void on_resume_all_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
     (void)d;
-    zd_queue_set_paused(false);
+    md_queue_set_paused(false);
     show_info_bar(GTK_MESSAGE_INFO, NULL);
 }
 
@@ -2896,7 +2903,7 @@ static void on_clear_done_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
     (void)d;
-    zd_queue_remove_finished();
+    md_queue_remove_finished();
 }
 
 static void on_limit_changed(GtkWidget *w, gpointer d)
@@ -2966,7 +2973,7 @@ static GtkWidget *build_downloads_page(void)
 static void on_forget_clicked(GtkButton *b, gpointer d)
 {
     (void)d;
-    zd_history_forget(g_object_get_data(G_OBJECT(b), "path"));
+    md_history_forget(g_object_get_data(G_OBJECT(b), "path"));
     refresh_statuses();
     rebuild_library();
 }
@@ -2976,7 +2983,7 @@ static void on_find_missing_clicked(GtkButton *b, gpointer d)
 {
     (void)d;
     gtk_entry_set_text(GTK_ENTRY(ui.search_entry), g_object_get_data(G_OBJECT(b), "path"));
-    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.kind_combo), ZD_KIND_ALL);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.kind_combo), MD_KIND_ALL);
     gtk_combo_box_set_active(GTK_COMBO_BOX(ui.filter_combo), FILTER_MISSING);
     gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "suche");
     if (ui.search_job) start_search();              /* laufende Suche abbrechen */
@@ -3001,7 +3008,7 @@ static void add_library_topic(const char *topic, int count, int missing, gint64 
     GtkWidget *arrow = gtk_image_new_from_icon_name(expanded ? "pan-down-symbolic"
                                                              : "pan-end-symbolic",
                                                     GTK_ICON_SIZE_MENU);
-    char *size = zd_format_size((double)bytes);
+    char *size = md_format_size((double)bytes);
     char *subtitle = g_strdup_printf("%d %s · %s", count, plural(count, "Titel", "Titel"), size);
     GtkWidget *suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     if (missing) {
@@ -3024,7 +3031,7 @@ static void add_library_topic(const char *topic, int count, int missing, gint64 
 }
 
 /* Zeile eines geladenen Titels */
-static void add_library_entry(const ZdHistoryEntry *e)
+static void add_library_entry(const MdHistoryEntry *e)
 {
     GtkWidget *suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     if (e->exists) {
@@ -3043,7 +3050,7 @@ static void add_library_entry(const ZdHistoryEntry *e)
                                            e->path, G_CALLBACK(on_forget_clicked)),
                            FALSE, FALSE, 0);
     }
-    char *date = format_date(e->finished), *size = zd_format_size((double)e->size);
+    char *date = format_date(e->finished), *size = md_format_size((double)e->size);
     char *subtitle = g_strdup_printf("%s · geladen am %s", size, date);
     GtkWidget *row = add_row(ui.library_list, e->title, subtitle, NULL, suffix, NULL);
     gtk_widget_set_margin_start(gtk_bin_get_child(GTK_BIN(row)), 40);
@@ -3054,7 +3061,7 @@ static void add_library_entry(const ZdHistoryEntry *e)
 }
 
 /* Trifft der Filter der Bibliothek auf diesen Eintrag zu? */
-static bool library_matches(const ZdHistoryEntry *e, const char *filter)
+static bool library_matches(const MdHistoryEntry *e, const char *filter)
 {
     if (!*filter) return true;
     char *text = g_strconcat(e->topic, " ", e->title, NULL), *lower = g_utf8_strdown(text, -1);
@@ -3073,7 +3080,7 @@ static void rebuild_library(void)
 
     int count = 0, shown = 0, gone = 0;
     gint64 total = 0;
-    ZdHistoryEntry *entries = zd_history_snapshot(&count);
+    MdHistoryEntry *entries = md_history_snapshot(&count);
     char *filter = g_utf8_strdown(gtk_entry_get_text(GTK_ENTRY(ui.library_search)), -1);
     for (int i = 0; i < count; ) {
         int end = i, matches = 0, missing = 0;
@@ -3102,7 +3109,7 @@ static void rebuild_library(void)
         gtk_widget_set_margin_bottom(label, 16);
         gtk_container_add(GTK_CONTAINER(ui.library_list), label);
     }
-    char *size = zd_format_size((double)total);
+    char *size = md_format_size((double)total);
     char *hero = g_strdup_printf("%d %s geladen", shown, plural(shown, "Titel", "Titel"));
     char *sub = gone ? g_strdup_printf("%s · bei %d %s fehlt die Datei", size, gone,
                                        plural(gone, "Titel", "Titeln"))
@@ -3113,7 +3120,7 @@ static void rebuild_library(void)
     g_free(hero);
     g_free(sub);
     g_free(filter);
-    zd_history_snapshot_free(entries, count);
+    md_history_snapshot_free(entries, count);
     gtk_widget_show_all(ui.library_list);
 }
 
@@ -3152,8 +3159,8 @@ static void update_settings_rows(void)
 {
     gtk_widget_set_sensitive(ui.encoder_row, ui.cfg.convert);
     gtk_widget_set_sensitive(ui.keep_row, ui.cfg.convert);
-    gtk_widget_set_sensitive(ui.gpu_row, ui.cfg.convert && ui.cfg.encoder == ZD_ENCODER_GPU);
-    gtk_widget_set_sensitive(ui.cpu_row, ui.cfg.convert && ui.cfg.encoder == ZD_ENCODER_CPU);
+    gtk_widget_set_sensitive(ui.gpu_row, ui.cfg.convert && ui.cfg.encoder == MD_ENCODER_GPU);
+    gtk_widget_set_sensitive(ui.cpu_row, ui.cfg.convert && ui.cfg.encoder == MD_ENCODER_CPU);
 }
 
 static void update_dir_label(void)
@@ -3296,9 +3303,9 @@ static GtkWidget *build_settings_page(void)
                           keep_switch, NULL);
 
     GtkWidget *queue = add_group(page, "Warteschlange");
-    parallel_spin = new_setting_spin(1, ZD_MAX_DOWNLOADS, c->parallel);
+    parallel_spin = new_setting_spin(1, MD_MAX_DOWNLOADS, c->parallel);
     add_row(queue, "Gleichzeitige Downloads", NULL, NULL, parallel_spin, NULL);
-    convert_spin = new_setting_spin(1, ZD_MAX_CONVERSIONS, c->conversions);
+    convert_spin = new_setting_spin(1, MD_MAX_CONVERSIONS, c->conversions);
     add_row(queue, "Gleichzeitige Umwandlungen", NULL, NULL, convert_spin, NULL);
 
     GtkWidget *search = add_group(page, "Suche");
@@ -3324,7 +3331,7 @@ static gboolean on_gpu_checked(gpointer d)
 static gpointer gpu_check_thread(gpointer d)
 {
     (void)d;
-    g_idle_add(on_gpu_checked, zd_gpu_available() ? GINT_TO_POINTER(1) : NULL);
+    g_idle_add(on_gpu_checked, md_gpu_available() ? GINT_TO_POINTER(1) : NULL);
     return NULL;
 }
 
@@ -3381,10 +3388,10 @@ static gboolean on_window_state(GtkWidget *w, GdkEventWindowState *e, gpointer d
 static int open_jobs(void)
 {
     int count = 0, open = 0;
-    ZdJobView *jobs = zd_queue_snapshot(&count);
+    MdJobView *jobs = md_queue_snapshot(&count);
     for (int i = 0; i < count; i++)
-        open += jobs[i].state != ZD_JOB_DONE && jobs[i].state != ZD_JOB_FAILED && !jobs[i].paused;
-    zd_queue_snapshot_free(jobs, count);
+        open += jobs[i].state != MD_JOB_DONE && jobs[i].state != MD_JOB_FAILED && !jobs[i].paused;
+    md_queue_snapshot_free(jobs, count);
     return open;
 }
 
@@ -3437,7 +3444,7 @@ static void on_action_open_log(GSimpleAction *a, GVariant *p, gpointer d)
     (void)a;
     (void)p;
     (void)d;
-    if (g_file_test(zd_log_path(), G_FILE_TEST_IS_REGULAR)) open_in_default_app(zd_log_path());
+    if (g_file_test(md_log_path(), G_FILE_TEST_IS_REGULAR)) open_in_default_app(md_log_path());
     else show_info_bar(GTK_MESSAGE_INFO, "Es gibt noch kein Protokoll.");
 }
 
@@ -3446,7 +3453,7 @@ static void on_action_open_data(GSimpleAction *a, GVariant *p, gpointer d)
     (void)a;
     (void)p;
     (void)d;
-    open_in_default_app(zd_app_dir());
+    open_in_default_app(md_app_dir());
 }
 
 static void on_action_about(GSimpleAction *a, GVariant *p, gpointer d)
@@ -3454,15 +3461,15 @@ static void on_action_about(GSimpleAction *a, GVariant *p, gpointer d)
     (void)a;
     (void)p;
     (void)d;
-    gtk_show_about_dialog(GTK_WINDOW(ui.win), "program-name", APP_NAME, "version", ZD_VERSION,
-                          "logo-icon-name", "zdf-downloader", "comments",
+    gtk_show_about_dialog(GTK_WINDOW(ui.win), "program-name", APP_NAME, "version", MD_VERSION,
+                          "logo-icon-name", "mediathek-downloader", "comments",
                           "Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat für den "
                           "privaten Gebrauch "
                           "– mit Pause, Tempolimit, allen Sprachen und Untertiteln und auf Wunsch "
                           "als AV1. Suche über MediathekViewWeb.\n"
                           "Information courtesy of IMDb (https://www.imdb.com). "
                           "Used with permission.\n"
-                          "Einstellungen, Verlauf und Protokoll: ~/.zdf-downloader",
+                          "Einstellungen, Verlauf und Protokoll: ~/.mediathek-downloader",
                           NULL);
 }
 
@@ -3495,7 +3502,7 @@ static GtkWidget *build_menu_button(void)
     GMenu *menu = g_menu_new(), *about = g_menu_new();
     g_menu_append(menu, "Protokoll öffnen", "app.open-log");
     g_menu_append(menu, "Datenordner öffnen", "app.open-data");
-    g_menu_append(about, "Über ZDF-Downloader", "app.about");
+    g_menu_append(about, "Über Mediathek Downloader", "app.about");
     g_menu_append_section(menu, NULL, G_MENU_MODEL(about));
     GtkWidget *menu_button = gtk_menu_button_new();
     gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_button), G_MENU_MODEL(menu));
@@ -3511,7 +3518,7 @@ static GtkWidget *build_menu_button(void)
 static void show_start_notes(void)
 {
     char *missing = NULL;
-    if (!zd_have_tools(&missing)) {
+    if (!md_have_tools(&missing)) {
         char *text = g_strdup_printf("%s ist nicht installiert – bitte über die "
                                      "Anwendungsverwaltung nachinstallieren.", missing);
         show_info_bar(GTK_MESSAGE_ERROR, text);
@@ -3520,9 +3527,9 @@ static void show_start_notes(void)
         return;
     }
     int count = 0, paused = 0;
-    ZdJobView *jobs = zd_queue_snapshot(&count);
+    MdJobView *jobs = md_queue_snapshot(&count);
     for (int i = 0; i < count; i++) paused += jobs[i].paused;
-    zd_queue_snapshot_free(jobs, count);
+    md_queue_snapshot_free(jobs, count);
     if (paused) {
         char *text = g_strdup_printf("%d %s vom letzten Mal – auf der Seite Downloads fortsetzen.",
                                      paused, plural(paused, "Download wartet", "Downloads warten"));
@@ -3550,7 +3557,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     ui.win = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(ui.win), APP_NAME);
     gtk_window_set_default_size(GTK_WINDOW(ui.win), ui.cfg.width, ui.cfg.height);
-    gtk_window_set_icon_name(GTK_WINDOW(ui.win), "zdf-downloader");
+    gtk_window_set_icon_name(GTK_WINDOW(ui.win), "mediathek-downloader");
     if (ui.cfg.maximized) gtk_window_maximize(GTK_WINDOW(ui.win));
     ui.header = gtk_header_bar_new();
     gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(ui.header), TRUE);
@@ -3605,7 +3612,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     sync_genre_chips();
     sync_source_buttons();
     on_tick(NULL);
-    start_preview_load(ZD_CACHE_USE);
+    start_preview_load(MD_CACHE_USE);
     g_thread_unref(g_thread_new("gpu", gpu_check_thread, NULL));
     gtk_widget_grab_focus(ui.preview_search);
 }
@@ -3613,8 +3620,8 @@ static void on_activate(GtkApplication *app, gpointer d)
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
-    zd_init(true);
-    g_set_prgname("zdf-downloader");
+    md_init(true);
+    g_set_prgname("mediathek-downloader");
     g_set_application_name(APP_NAME);
     ui.app = gtk_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(ui.app, "startup", G_CALLBACK(on_startup), NULL);
@@ -3623,7 +3630,7 @@ int main(int argc, char **argv)
     g_unix_signal_add(SIGTERM, on_unix_signal, NULL);
     g_unix_signal_add(SIGHUP, on_unix_signal, NULL);
     int rc = g_application_run(G_APPLICATION(ui.app), argc, argv);
-    zd_shutdown();
+    md_shutdown();
     g_object_unref(ui.app);
     return rc;
 }
