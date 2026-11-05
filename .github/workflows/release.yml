@@ -1,14 +1,18 @@
 name: Release
 
+# Ein Tag v<Version> baut das .deb (Linux) und den Installer (Windows), legt beide mit
+# SHA256SUMS als GitHub-Release ab und bringt das .deb ins VPRepo. Von Hand gestartet entstehen
+# nur die beiden Pakete als Artefakte, ohne Release.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  linux:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -27,16 +31,76 @@ jobs:
         run: make deb
 
       - name: Tag und Paketversion vergleichen
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           version=$(dpkg-deb -f ./*.deb Version)
           tag=${GITHUB_REF_NAME#v}
           [ "$tag" = "$version" ] || [ "$tag-1" = "$version" ] ||
             { echo "::error::Tag $GITHUB_REF_NAME passt nicht zu Paketversion $version"; exit 1; }
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: ./*.deb
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-adwaita-icon-theme
+            mingw-w64-x86_64-gstreamer
+            mingw-w64-x86_64-gst-plugins-base
+            mingw-w64-x86_64-gst-plugins-good
+            mingw-w64-x86_64-gst-plugins-bad
+            mingw-w64-x86_64-gst-libav
+            mingw-w64-x86_64-ffmpeg
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-librsvg
+            mingw-w64-x86_64-imagemagick
+            mingw-w64-x86_64-nsis
+
+      - name: Programm und Installer bauen
+        run: windows/build.sh
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: ./*-setup.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          merge-multiple: true
+
+      - name: Prüfsummen
+        run: sha256sum ./*.deb ./*-setup.exe | sed 's# \./# #' > SHA256SUMS
+
       - name: GitHub-Release anlegen
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" ./*.deb --title "Mediathek Downloader ${GITHUB_REF_NAME#v}" --generate-notes
+        run: |
+          gh release create "$GITHUB_REF_NAME" ./*.deb ./*-setup.exe SHA256SUMS \
+            --title "Mediathek Downloader ${GITHUB_REF_NAME#v}" --generate-notes
 
       - name: In VPRepo veröffentlichen
         uses: EureLordschaft008/VPRepo/.github/actions/publish@main
