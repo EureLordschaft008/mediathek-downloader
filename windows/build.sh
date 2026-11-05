@@ -37,6 +37,9 @@ for tool in curl ffmpeg ffprobe gspawn-win64-helper gspawn-win64-helper-console 
     cp "$PREFIX/bin/$tool.exe" "$APP/bin/"
 done
 
+# curl sucht die Zertifikate relativ zu seinem Ordner
+install -Dm644 "$PREFIX/etc/ssl/certs/ca-bundle.crt" "$APP/etc/ssl/certs/ca-bundle.crt"
+
 # --- GStreamer: nur, was der Player braucht ------------------------------------------------
 gst-inspect-1.0 gtksink > /dev/null      # ohne gtksink kein Bild
 mkdir -p "$APP/lib/gstreamer-1.0" "$APP/libexec/gstreamer-1.0"
