@@ -93,7 +93,9 @@ jobs:
           merge-multiple: true
 
       - name: Prüfsummen
-        run: sha256sum ./*.deb ./*-setup.exe | sed 's# \./# #' > SHA256SUMS
+        run: |
+          sha256sum ./*.deb ./*-setup.exe | sed 's# \./# #' > SHA256SUMS
+          cat SHA256SUMS
 
       - name: GitHub-Release anlegen
         env:

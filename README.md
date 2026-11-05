@@ -1,4 +1,4 @@
-# Mediathek Downloader 2.0.0
+# Mediathek Downloader 2.0.1
 
 Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ZDFtivi, ZDFinfo, phoenix, ARD, ONE,
 ARD alpha, tagesschau24, WDR, SWR, NDR, MDR, BR, hr, SR, rbb, KiKA, funk, 3sat, ARTE (auch auf
@@ -23,7 +23,7 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_2.0.0-1_amd64.deb
+sudo apt install ./mediathek-downloader_2.0.1-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl`, `ffmpeg`
@@ -31,7 +31,7 @@ und für den eingebauten Player GStreamer; `apt` installiert alles mit.
 
 ### Windows
 
-`mediathek-downloader-2.0.0-setup.exe` von der
+`mediathek-downloader-2.0.1-setup.exe` von der
 [Release-Seite](https://github.com/EureLordschaft008/mediathek-downloader/releases/latest) laden
 und starten. Der Installer braucht keine Administratorrechte und legt das Programm nach
 `%LOCALAPPDATA%\Programs\Mediathek Downloader`, dazu einen Eintrag im Startmenü. GTK, GStreamer,
