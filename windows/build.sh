@@ -90,9 +90,9 @@ cp LICENSE "$APP/LICENSE.txt"
 "$APP/bin/mediathek-downloader-cli.exe" --help > /dev/null
 "$APP/bin/curl.exe" --version > /dev/null
 "$APP/bin/ffmpeg.exe" -hide_banner -version > /dev/null
-makensis -V2 -DVERSION="$VERSION" -DSRC="$(cygpath -w "$APP")" \
-    -DICON="$(cygpath -w "$WORK/mediathek-downloader.ico")" \
-    -DLICENSE="$(cygpath -w LICENSE)" \
-    -DOUTFILE="$(cygpath -w "$PWD/mediathek-downloader-$VERSION-setup.exe")" \
+makensis -V2 -DVERSION="$VERSION" -DSRC="$(cygpath -aw "$APP")" \
+    -DICON="$(cygpath -aw "$WORK/mediathek-downloader.ico")" \
+    -DLICENSE="$(cygpath -aw LICENSE)" \
+    -DOUTFILE="$(cygpath -aw "$PWD/mediathek-downloader-$VERSION-setup.exe")" \
     windows/installer.nsi
 echo "fertig: mediathek-downloader-$VERSION-setup.exe ($(du -sh "$APP" | cut -f1) entpackt)"
