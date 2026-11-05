@@ -69,7 +69,6 @@ jobs:
             ffmpeg:p
             curl:p
             librsvg:p
-            imagemagick:p
             nsis:p
 
       - name: Programm und Installer bauen

@@ -14,10 +14,8 @@ PREFIX=${MINGW_PREFIX:-/ucrt64}
 rm -rf "$WORK"
 mkdir -p "$APP/bin"
 
-# --- Symbol --------------------------------------------------------------------------------
-rsvg-convert -w 256 -h 256 data/mediathek-downloader.svg -o "$WORK/icon-256.png"
-magick "$WORK/icon-256.png" -define icon:auto-resize=256,128,64,48,32,16 \
-    "$WORK/mediathek-downloader.ico"
+# --- Symbol (mediathek-downloader.ico ist aus data/mediathek-downloader.svg erzeugt) ---------
+cp windows/mediathek-downloader.ico "$WORK/"
 printf '1 ICON "mediathek-downloader.ico"\n' > "$WORK/app.rc"
 windres -I "$WORK" "$WORK/app.rc" -O coff -o "$WORK/app.res.o"
 

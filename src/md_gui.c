@@ -86,7 +86,12 @@ static const char *const KIND_TEXT[3] = {"Alles", "Filme", "Serien"};
 static const char *const QUALITY_TEXT[3] = {"Hoch – 1080p (ca. 4,5 GB je 90 min)",
                                             "Mittel (ca. 2,3 GB je 90 min)",
                                             "Niedrig (ca. 0,5 GB je 90 min)"};
+#ifdef G_OS_WIN32
+static const char *const ENCODER_TEXT[2] = {"GPU – schnell (NVENC, QSV oder AMF)",
+                                            "CPU – langsam (SVT-AV1)"};
+#else
 static const char *const ENCODER_TEXT[2] = {"GPU – schnell (VAAPI)", "CPU – langsam (SVT-AV1)"};
+#endif
 
 typedef enum { ROW_GROUP, ROW_SEASON, ROW_ITEM } RowKind;
 
@@ -5596,10 +5601,13 @@ static gboolean on_update_checked(gpointer data)
     if (job->update && (job->manual || g_strcmp0(job->update->version, ui.cfg.update_skip))) {
         md_update_free(ui.update);
         ui.update = g_steal_pointer(&job->update);
-        char *text = g_strdup_printf("Version %s ist da (installiert ist %s).",
-                                     ui.update->version, MD_VERSION);
+        /* ohne Datei für dieses System oder ohne Prüfsumme nur der Hinweis auf die Seite */
+        bool installable = ui.update->file_url && ui.update->sums_url;
+        char *text = g_strdup_printf("Version %s ist da (installiert ist %s).%s",
+                                     ui.update->version, MD_VERSION, installable ? ""
+                                     : " Sie lässt sich nur von der Release-Seite laden.");
         gtk_button_set_label(GTK_BUTTON(ui.update_install), "Installieren");
-        show_update_bar(GTK_MESSAGE_INFO, text, ui.update->file_url != NULL, true);
+        show_update_bar(GTK_MESSAGE_INFO, text, installable, true);
         g_free(text);
     } else if (job->manual && job->error) {
         show_update_bar(GTK_MESSAGE_WARNING, job->error, false, false);
