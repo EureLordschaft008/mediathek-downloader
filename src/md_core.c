@@ -4549,7 +4549,8 @@ MdUpdate *md_update_check(char **error)
         const JsonNode *assets = json_at(root, "assets");
         for (guint i = 0; i < json_count(assets); i++) {
             const JsonNode *a = assets->items->pdata[i];
-            const char *name = json_text_at(a, "name"), *url = json_text_at(a, "browser_download_url");
+            const char *name = json_text_at(a, "name");
+            const char *url = json_text_at(a, "browser_download_url");
             /* nur Dateien aus diesem Repo, und keine Namen mit Pfadteilen */
             if (!name || !url || !g_str_has_prefix(url, UPDATE_DOWNLOADS) || strchr(name, '/')
                 || strchr(name, '\\'))
@@ -4605,7 +4606,8 @@ char *md_update_download(const MdUpdate *u, char **error)
 {
     *error = NULL;
     if (!u->file_url || !u->sums_url) {
-        *error = g_strdup(!u->file_url ? "Für dieses System liegt der neuen Version keine Datei bei."
+        *error = g_strdup(!u->file_url
+                          ? "Für dieses System liegt der neuen Version keine Datei bei."
                           : "Der neuen Version liegt keine Prüfsumme bei.");
         return NULL;
     }
