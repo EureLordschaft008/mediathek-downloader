@@ -2,7 +2,7 @@
 # Mediathek Downloader für Windows bauen: Programm, alle Bibliotheken, GStreamer, ffmpeg und curl
 # in einen Ordner, daraus den Installer mediathek-downloader-<Version>-setup.exe.
 #
-# Läuft in MSYS2 (Umgebung MINGW64), siehe .github/workflows/release.yml für die Pakete:
+# Läuft in MSYS2 (Umgebung UCRT64), siehe .github/workflows/release.yml für die Pakete:
 #   windows/build.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 VERSION=$(sed -n 's/^VERSION *:= *//p' Makefile)
 WORK=build/windows
 APP=$WORK/app
-PREFIX=/mingw64
+PREFIX=${MINGW_PREFIX:-/ucrt64}
 rm -rf "$WORK"
 mkdir -p "$APP/bin"
 

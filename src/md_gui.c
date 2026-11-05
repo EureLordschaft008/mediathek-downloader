@@ -5810,16 +5810,15 @@ static void on_action_about(GSimpleAction *a, GVariant *p, gpointer d)
     (void)a;
     (void)p;
     (void)d;
+    char *comments = g_strdup_printf(
+        "Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und weiteren für den privaten "
+        "Gebrauch – mit Pause, Tempolimit, allen Sprachen und Untertiteln und auf Wunsch als AV1. "
+        "Suche über MediathekViewWeb.\n"
+        "Information courtesy of IMDb (https://www.imdb.com). Used with permission.\n"
+        "Einstellungen, Verlauf und Protokoll: %s", md_app_dir());
     gtk_show_about_dialog(GTK_WINDOW(ui.win), "program-name", APP_NAME, "version", MD_VERSION,
-                          "logo-icon-name", "mediathek-downloader", "comments",
-                          "Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat für den "
-                          "privaten Gebrauch "
-                          "– mit Pause, Tempolimit, allen Sprachen und Untertiteln und auf Wunsch "
-                          "als AV1. Suche über MediathekViewWeb.\n"
-                          "Information courtesy of IMDb (https://www.imdb.com). "
-                          "Used with permission.\n"
-                          "Einstellungen, Verlauf und Protokoll: ~/.mediathek-downloader",
-                          NULL);
+                          "logo-icon-name", "mediathek-downloader", "comments", comments, NULL);
+    g_free(comments);
 }
 
 static void on_action_quit(GSimpleAction *a, GVariant *p, gpointer d)

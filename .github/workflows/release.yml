@@ -54,23 +54,23 @@ jobs:
 
       - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-gtk3
-            mingw-w64-x86_64-adwaita-icon-theme
-            mingw-w64-x86_64-gstreamer
-            mingw-w64-x86_64-gst-plugins-base
-            mingw-w64-x86_64-gst-plugins-good
-            mingw-w64-x86_64-gst-plugins-bad
-            mingw-w64-x86_64-gst-libav
-            mingw-w64-x86_64-ffmpeg
-            mingw-w64-x86_64-curl
-            mingw-w64-x86_64-librsvg
-            mingw-w64-x86_64-imagemagick
-            mingw-w64-x86_64-nsis
+          pacboy: >-
+            gcc:p
+            pkgconf:p
+            gtk3:p
+            adwaita-icon-theme:p
+            gstreamer:p
+            gst-plugins-base:p
+            gst-plugins-good:p
+            gst-plugins-bad:p
+            gst-libav:p
+            ffmpeg:p
+            curl:p
+            librsvg:p
+            imagemagick:p
+            nsis:p
 
       - name: Programm und Installer bauen
         run: windows/build.sh
