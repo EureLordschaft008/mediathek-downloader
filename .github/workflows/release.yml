@@ -64,6 +64,7 @@ jobs:
             gstreamer:p
             gst-plugins-base:p
             gst-plugins-good:p
+            gst-plugin-gtk:p
             gst-plugins-bad:p
             gst-libav:p
             ffmpeg:p
