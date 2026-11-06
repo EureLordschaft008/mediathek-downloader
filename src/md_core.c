@@ -4905,12 +4905,23 @@ static gpointer move_cache_thread(gpointer data)
     return NULL;
 }
 
-/* Pfade umstellen (die alten Zeichenketten bleiben gültig, siehe md_app_dir) */
+/* Pfade umstellen (die alten Zeichenketten bleiben gültig, siehe md_app_dir; die Liste hält
+ * sie erreichbar, damit sie nicht als Leck gelten) */
+static GPtrArray *g_old_paths;
+
+static void replace_path(char **slot, char *value)
+{
+    char *old = g_atomic_pointer_exchange(slot, value);
+    if (!old) return;
+    if (!g_old_paths) g_old_paths = g_ptr_array_new();
+    g_ptr_array_add(g_old_paths, old);
+}
+
 static void use_data_dir(const char *parent, const char *dir)
 {
-    g_atomic_pointer_set(&g_data_parent, parent && *parent ? g_strdup(parent) : NULL);
-    g_atomic_pointer_set(&g_app_dir, g_strdup(dir));
-    g_atomic_pointer_set(&g_log_path, g_build_filename(dir, "protokoll.log", NULL));
+    replace_path(&g_data_parent, parent && *parent ? g_strdup(parent) : NULL);
+    replace_path(&g_app_dir, g_strdup(dir));
+    replace_path(&g_log_path, g_build_filename(dir, "protokoll.log", NULL));
 }
 
 bool md_set_data_parent(const char *parent, char **error)
