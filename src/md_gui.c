@@ -386,6 +386,10 @@ static void rebuild_videos(bool force);
 static void play_path(const char *path);
 static void on_video_tile_activated(GtkFlowBox *box, GtkFlowBoxChild *child, gpointer d);
 static void update_selection(void);
+static const WatchState *watch_get(const char *path);
+static bool watch_done(const WatchState *w);
+static bool watch_started(const WatchState *w);
+static int watch_percent(const WatchState *w);
 
 /* ---------------------------------------------------------------------------
  * Kleine Helfer
@@ -1119,6 +1123,23 @@ static GtkWidget *status_badge(MdStatus status)
     }
 }
 
+/* Marke zum Sehstand einer geladenen Datei; NULL = noch nicht angefangen */
+static GtkWidget *watch_badge(const char *path)
+{
+    const WatchState *w = ui.watch ? watch_get(path) : NULL;
+    if (watch_done(w)) return new_badge("✓ Gesehen", "ok");
+    if (!watch_started(w) || w->duration <= 0) return NULL;
+    char *text = g_strdup_printf("%d %% gesehen", watch_percent(w));
+    GtkWidget *badge = new_badge(text, "ok");
+    char *rest = md_format_time(w->duration - w->position);
+    char *tip = g_strdup_printf("Geladen · noch %s", rest);
+    gtk_widget_set_tooltip_text(badge, tip);
+    g_free(rest);
+    g_free(tip);
+    g_free(text);
+    return badge;
+}
+
 /* Marke zum Stand einer Staffel oder Serie */
 static GtkWidget *counts_badge(const Counts *c)
 {
@@ -1268,7 +1289,9 @@ static void add_item_row(ResultTree *tree, Item *item, int depth)
     ref->kind = ROW_ITEM;
     ref->data = item;
     GtkWidget *suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *badge = status_badge(item->status);
+    GtkWidget *badge = item->status == MD_STATUS_DONE && item->path ? watch_badge(item->path)
+                                                                    : NULL;
+    if (!badge) badge = status_badge(item->status);
     if (badge) {
         gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
         gtk_box_pack_start(GTK_BOX(suffix), badge, FALSE, FALSE, 0);
@@ -2106,7 +2129,9 @@ static void update_tile(const Group *group)
     GtkWidget *badge = NULL;
     if (group->is_film && c.total == 1) {
         const Season *season = group->seasons->pdata[0];
-        badge = status_badge(((Item *)season->items->pdata[0])->status);
+        const Item *item = season->items->pdata[0];
+        if (item->status == MD_STATUS_DONE && item->path) badge = watch_badge(item->path);
+        if (!badge) badge = status_badge(item->status);
     } else if (c.selected) {
         char *text = g_strdup_printf("%d gewählt", c.selected);
         badge = new_badge(text, NULL);
@@ -3871,6 +3896,14 @@ static bool watch_started(const WatchState *w)
     return w && w->position >= RESUME_MIN_SECONDS && !watch_done(w);
 }
 
+/* gesehener Anteil in Prozent, für angefangene Dateien 1 bis 99 */
+static int watch_percent(const WatchState *w)
+{
+    if (watch_done(w)) return 100;
+    if (!watch_started(w) || w->duration <= 0) return 0;
+    return CLAMP((int)(w->position * 100 / w->duration), 1, 99);
+}
+
 static char *watch_path(void)
 {
     return g_build_filename(md_app_dir(), WATCH_FILE, NULL);
@@ -4499,7 +4532,7 @@ static char *watch_text(const WatchState *w, const MdHistoryEntry *e)
     if (watch_done(w)) return g_strdup("Gesehen");
     if (watch_started(w) && w->duration > 0) {
         char *rest = md_format_time(w->duration - w->position);
-        char *text = g_strdup_printf("Noch %s", rest);
+        char *text = g_strdup_printf("%d %% · noch %s", watch_percent(w), rest);
         g_free(rest);
         return text;
     }

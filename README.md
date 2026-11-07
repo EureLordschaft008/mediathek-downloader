@@ -99,7 +99,9 @@ das Update unter Linux auch über `sudo apt upgrade`.
   Kategorien kommen aus der Vorschau, sonst von IMDb, und bleiben gespeichert. Eine Serie
   öffnet sich mit ihren Staffeln und Folgen; der große Knopf spielt die angefangene oder die nächste
   ungesehene Folge. Bilder kommen von der Mediathek, sonst als Standbild aus der Datei. Ein Balken
-  zeigt, wie weit eine Datei oder Serie geschaut ist („3 von 10 gesehen“). Die rechte Maustaste
+  zeigt, wie weit eine Datei oder Serie geschaut ist („3 von 10 gesehen“); jede angefangene Folge
+  nennt dazu den Anteil und die Restzeit („40 % · noch 25 min“). Auch in der Detailansicht der
+  Vorschau steht an geladenen Folgen „40 % gesehen“ oder „Gesehen“ statt nur „Geladen“. Die rechte Maustaste
   markiert als gesehen oder ungesehen, öffnet Ordner oder ein anderes Programm, wandelt nachträglich
   nach AV1 um (eine Datei oder alle Folgen; was schon AV1 ist, bleibt) und verschiebt Filme,
   Folgen oder ganze Serien nach Rückfrage in den Papierkorb; leere Staffelordner verschwinden mit.
