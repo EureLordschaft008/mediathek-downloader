@@ -1972,6 +1972,7 @@ static bool dedup_candidate(const MdTitle *t)
 static void drop_duplicate_episodes(GPtrArray *titles)
 {
     GHashTable *best = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    guint titles_len = titles->len;     /* am Ende sind schon Titel entfernt */
     char **names = g_new0(char *, titles->len + 1);
     for (guint i = 0; i < titles->len; i++) {
         const MdTitle *t = titles->pdata[i];
@@ -2057,7 +2058,9 @@ static void drop_duplicate_episodes(GPtrArray *titles)
         if (drop[i]) g_ptr_array_remove_index(titles, i);
     g_hash_table_destroy(chosen);
     g_hash_table_destroy(best);
-    g_strfreev(names);
+    /* names hat Lücken (NULL), g_strfreev hörte an der ersten auf */
+    for (guint i = 0; i < titles_len; i++) g_free(names[i]);
+    g_free(names);
     g_free(drop);
 }
 
